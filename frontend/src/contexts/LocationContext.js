@@ -180,11 +180,14 @@ export const LocationProvider = ({ children }) => {
         setLocation(ld);
         localStorage.setItem('userLocation', JSON.stringify(ld));
         setError(null);
-        // Reverse-geocode for pincode
+        
+        // Reverse-geocode for pincode (optional, don't fail if it times out)
         try {
           const rgRes = await axios.get(`${BACKEND}/api/location/reverse-geocode`, {
-            params: { lat: latitude, lon: longitude }, timeout: 8000,
+            params: { lat: latitude, lon: longitude }, 
+            timeout: 5000,  // Reduced timeout to 5 seconds
           });
+          
           if (rgRes.data.success && rgRes.data.pincode) {
             const pc = rgRes.data.pincode;
             setGpsPincode(pc);
@@ -195,7 +198,10 @@ export const LocationProvider = ({ children }) => {
               state: prev.state || rgRes.data.state,
             } : prev);
           }
-        } catch (rgErr) { console.warn('Reverse geocode failed:', rgErr.message); }
+        } catch (rgErr) { 
+          // Log warning but don't fail - user can still set location via PIN
+          console.warn('Reverse geocode timeout (this is OK):', rgErr.message); 
+        }
       }
     } catch (err) {
       setError(err.code === 'ECONNABORTED' ? 'Connection timeout.' : 'Unable to update location.');
