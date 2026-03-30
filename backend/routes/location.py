@@ -296,11 +296,13 @@ async def reverse_geocode(lat: float, lon: float):
     """
     Reverse-geocode GPS coordinates to pincode, city, state using Nominatim.
     Used by the frontend on app load to detect the user's current pincode.
+    Non-critical: if this times out, location is still set via GPS - this just adds PIN info.
     """
     import httpx
     try:
         headers = {"User-Agent": "SurakshaSetuApp/1.0 (disaster-alert-platform)"}
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        # Increased timeout to 12 seconds to handle slow Nominatim responses
+        async with httpx.AsyncClient(timeout=12.0) as client:
             resp = await client.get(
                 "https://nominatim.openstreetmap.org/reverse",
                 params={"lat": lat, "lon": lon, "format": "json", "addressdetails": 1},
