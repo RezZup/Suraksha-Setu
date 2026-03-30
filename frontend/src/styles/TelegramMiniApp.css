@@ -1,0 +1,447 @@
+/**
+ * Telegram Mini App Styling
+ * ──────────────────────────
+ * Optimized for Telegram Mini App display with
+ * Telegram Bot API WebApp theme colors.
+ */
+
+.telegram-mini-app {
+  width: 100%;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Header */
+.telegram-header {
+  text-align: center;
+  color: white;
+  margin-bottom: 30px;
+  animation: slideDown 0.5s ease-out;
+}
+
+.telegram-header h1 {
+  font-size: 2.5rem;
+  margin: 0 0 10px 0;
+  font-weight: 700;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.telegram-header p {
+  font-size: 1rem;
+  opacity: 0.9;
+  margin: 0;
+}
+
+/* Status Container */
+.telegram-status-container {
+  background: white;
+  border-radius: 20px;
+  padding: 40px;
+  max-width: 400px;
+  width: 100%;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  animation: slideUp 0.5s ease-out;
+}
+
+/* Loader / Initializing */
+.telegram-loader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 250px;
+}
+
+.spinner {
+  width: 50px;
+  height: 50px;
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #667eea;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 20px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.telegram-loader p {
+  font-size: 1.1rem;
+  color: #333;
+  margin: 0;
+  font-weight: 500;
+}
+
+/* Success State */
+.telegram-success {
+  text-align: center;
+  animation: popIn 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+}
+
+.success-icon {
+  font-size: 4rem;
+  margin-bottom: 20px;
+  animation: bounce 0.8s ease-in-out infinite;
+  display: inline-block;
+}
+
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+.telegram-success h2 {
+  font-size: 1.8rem;
+  color: #27ae60;
+  margin: 0 0 10px 0;
+  font-weight: 700;
+}
+
+.telegram-success > p {
+  font-size: 1rem;
+  color: #666;
+  margin: 0 0 20px 0;
+}
+
+/* Info Display */
+.telegram-info {
+  background: #f8f9fa;
+  border-radius: 12px;
+  padding: 15px;
+  margin: 20px 0;
+  border-left: 4px solid #667eea;
+}
+
+.info-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  font-size: 0.95rem;
+}
+
+.info-label {
+  color: #666;
+  font-weight: 600;
+}
+
+.info-value {
+  color: #27ae60;
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-weight: 700;
+  background: white;
+  padding: 4px 12px;
+  border-radius: 6px;
+  word-break: break-all;
+}
+
+/* Next Steps */
+.telegram-next-steps {
+  background: #e8f5e9;
+  border-radius: 12px;
+  padding: 15px;
+  margin: 20px 0;
+  text-align: left;
+}
+
+.telegram-next-steps h3 {
+  margin: 0 0 10px 0;
+  color: #1b5e20;
+  font-size: 1rem;
+}
+
+.telegram-next-steps ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.telegram-next-steps li {
+  padding: 6px 0;
+  color: #2e7d32;
+  font-size: 0.95rem;
+}
+
+/* Footer Message */
+.telegram-footer {
+  font-size: 0.85rem;
+  color: #999;
+  margin-top: 15px;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+/* Error State */
+.telegram-error {
+  text-align: center;
+  animation: shake 0.5s ease-in-out;
+}
+
+.error-icon {
+  font-size: 4rem;
+  margin-bottom: 20px;
+  display: inline-block;
+}
+
+.telegram-error h2 {
+  font-size: 1.8rem;
+  color: #e74c3c;
+  margin: 0 0 10px 0;
+  font-weight: 700;
+}
+
+.error-message {
+  font-size: 0.95rem;
+  color: #666;
+  margin: 0 0 20px 0;
+  line-height: 1.5;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  10%, 30%, 50%, 70%, 90% { transform: translateX(-5px); }
+  20%, 40%, 60%, 80% { transform: translateX(5px); }
+}
+
+/* Error Help Section */
+.telegram-error-help {
+  background: #fff3cd;
+  border-radius: 12px;
+  padding: 15px;
+  margin: 20px 0;
+  text-align: left;
+  border-left: 4px solid #ffc107;
+}
+
+.telegram-error-help h3 {
+  margin: 0 0 10px 0;
+  color: #856404;
+  font-size: 1rem;
+}
+
+.telegram-error-help ol {
+  margin: 0;
+  padding-left: 20px;
+  color: #856404;
+}
+
+.telegram-error-help li {
+  padding: 6px 0;
+  font-size: 0.95rem;
+}
+
+.telegram-error-help strong {
+  font-weight: 700;
+  color: #721c24;
+}
+
+/* Retry Button */
+.telegram-retry-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 12px 30px;
+  font-size: 1rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  margin-top: 20px;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+}
+
+.telegram-retry-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+}
+
+.telegram-retry-btn:active {
+  transform: translateY(0);
+}
+
+/* Tips Section */
+.telegram-tips {
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 400px;
+  width: 100%;
+  margin-top: 20px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1);
+}
+
+.telegram-tips h3 {
+  margin: 0 0 10px 0;
+  color: #333;
+  font-size: 1rem;
+}
+
+.telegram-tips ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.telegram-tips li {
+  padding: 8px 0;
+  color: #666;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+}
+
+.telegram-tips li::before {
+  content: '✓';
+  display: inline-block;
+  width: 20px;
+  color: #667eea;
+  font-weight: bold;
+}
+
+/* Animations */
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes popIn {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Telegram Color Variants */
+.telegram-status-initializing {
+  border-top: 4px solid #0088cc;
+}
+
+.telegram-status-registering {
+  border-top: 4px solid #0088cc;
+}
+
+.telegram-status-success {
+  border-top: 4px solid #27ae60;
+}
+
+.telegram-status-error {
+  border-top: 4px solid #e74c3c;
+}
+
+/* Mobile Responsive */
+@media (max-width: 480px) {
+  .telegram-mini-app {
+    padding: 10px;
+  }
+
+  .telegram-header h1 {
+    font-size: 2rem;
+  }
+
+  .telegram-header p {
+    font-size: 0.9rem;
+  }
+
+  .telegram-status-container {
+    padding: 30px 20px;
+    border-radius: 16px;
+  }
+
+  .success-icon,
+  .error-icon {
+    font-size: 3rem;
+  }
+
+  .telegram-success h2,
+  .telegram-error h2 {
+    font-size: 1.4rem;
+  }
+
+  .info-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .telegram-tips {
+    margin-top: 15px;
+    padding: 15px;
+  }
+}
+
+/* Dark Mode Support */
+@media (prefers-color-scheme: dark) {
+  .telegram-mini-app {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  }
+
+  .telegram-status-container {
+    background: #1e1e1e;
+    color: #e0e0e0;
+  }
+
+  .telegram-loader p,
+  .telegram-success > p,
+  .error-message {
+    color: #b0b0b0;
+  }
+
+  .info-value {
+    background: #2a2a2a;
+    color: #4ecdc4;
+  }
+
+  .telegram-error-help {
+    background: #3d3d1a;
+    color: #d4af9a;
+    border-left-color: #ffc107;
+  }
+
+  .telegram-tips {
+    background: rgba(30, 30, 30, 0.95);
+    color: #e0e0e0;
+  }
+
+  .telegram-tips li {
+    color: #b0b0b0;
+  }
+}

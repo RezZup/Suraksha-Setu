@@ -7,6 +7,7 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import MainLayout from "@/components/layout/MainLayout";
 import PWAInstallPrompt from "@/components/pwa/PWAInstallPrompt";
 import OfflineIndicator from "@/components/pwa/OfflineIndicator";
+import TelegramMiniApp from "@/components/TelegramMiniApp";
 import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
@@ -38,6 +39,9 @@ function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
+            
+            {/* Telegram Mini App Route - No Auth Required */}
+            <Route path="/telegram-app" element={<TelegramMiniApp />} />
             
             {/* Protected Routes - Require Authentication */}
             <Route path="/app" element={

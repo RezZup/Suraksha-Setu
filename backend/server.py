@@ -884,6 +884,10 @@ except ImportError:
 from routes.profile import profile_router
 app.include_router(profile_router)
 
+# Telegram Mini App routes
+from routes.telegram import telegram_router
+app.include_router(telegram_router)
+
 
 # ── Telegram Bot Webhook ──────────────────────────────────────────────────────
 

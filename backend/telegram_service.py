@@ -210,5 +210,94 @@ class TelegramService:
         logger.info("Telegram pincode notify (%s): %d/%d sent for '%s'", pincode, sent_count, len(tasks), alert.get("title"))
         return sent_count
 
+    # ── Telegram Mini App validation ──────────────────────────────────────────
+
+    def validate_mini_app_data(self, init_data: str) -> Optional[Dict[str, Any]]:
+        """
+        Validate Telegram Mini App data using HMAC-SHA256.
+        
+        When a user launches a Mini App, Telegram sends initData containing:
+        - query_id: unique identifier
+        - user: {id, is_bot, first_name, last_name, username, language_code, ...}
+        - auth_date: timestamp
+        - hash: HMAC-SHA256 signature
+        
+        We verify the hash using: HMAC_SHA256(init_data, WebAppData token)
+        where WebAppData token = HMAC_SHA256(bot_token, "WebAppData")
+        
+        Returns parsed user/init data if valid, None if invalid.
+        """
+        import hmac
+        import json
+        from urllib.parse import parse_qs, unquote
+        
+        if not init_data or not self.token:
+            return None
+        
+        try:
+            # Parse query string
+            parsed_data = parse_qs(init_data)
+            data_hash = parsed_data.get("hash", [None])[0]
+            
+            if not data_hash:
+                logger.warning("Mini App data missing hash")
+                return None
+            
+            # Reconstruct data string (hash is excluded)
+            data_check_string = "\n".join(
+                f"{k}={unquote(v[0])}"
+                for k, v in sorted(parsed_data.items())
+                if k != "hash"
+            )
+            
+            # Compute expected hash
+            secret_key = hmac.new(
+                b"WebAppData",
+                self.token.encode(),
+                hashlib.sha256
+            ).digest()
+            
+            expected_hash = hmac.new(
+                secret_key,
+                data_check_string.encode(),
+                hashlib.sha256
+            ).hexdigest()
+            
+            # Compare hashes (timing-safe)
+            if not hmac.compare_digest(data_hash, expected_hash):
+                logger.warning("Mini App hash verification failed")
+                return None
+            
+            # Parse init_data
+            auth_date = int(parsed_data.get("auth_date", ["0"])[0])
+            
+            # Check if data is not too old (within 10 minutes)
+            current_time = int(time.time())
+            if current_time - auth_date > 600:
+                logger.warning("Mini App data too old (auth_date=%s)", auth_date)
+                return None
+            
+            # Parse user data
+            user_data_str = parsed_data.get("user", [None])[0]
+            if not user_data_str:
+                logger.warning("Mini App data missing user info")
+                return None
+            
+            user_data = json.loads(unquote(user_data_str))
+            
+            return {
+                "chat_id": str(user_data.get("id")),
+                "user_id": str(user_data.get("id")),
+                "telegram_username": user_data.get("username"),
+                "first_name": user_data.get("first_name"),
+                "last_name": user_data.get("last_name"),
+                "language_code": user_data.get("language_code"),
+                "is_bot": user_data.get("is_bot", False),
+                "auth_date": auth_date,
+            }
+        except Exception as exc:
+            logger.error("Mini App validation error: %s", exc)
+            return None
+
 
 telegram_service = TelegramService()
