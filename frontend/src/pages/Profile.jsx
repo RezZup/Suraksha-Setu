@@ -44,6 +44,7 @@ import {
   Home,
   RefreshCw,
 } from "lucide-react";
+import TelegramLinking from "@/components/profile/TelegramLinking";
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
 
@@ -521,6 +522,13 @@ export default function Profile() {
               )}
             </CardContent>
           </Card>
+
+          {/* Direct Chat ID Linking - NEW METHOD */}
+          <TelegramLinking
+            userId={user.uid}
+            firebaseToken={authToken}
+            currentChatId={dbProfile?.telegram_chat_id}
+          />
         </TabsContent>
 
         {/* Alert Settings tab */}

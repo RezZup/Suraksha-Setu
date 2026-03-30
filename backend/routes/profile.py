@@ -64,6 +64,12 @@ class TelegramVerifyRequest(BaseModel):
     telegram_username: Optional[str] = None
 
 
+class TelegramLinkChatIdRequest(BaseModel):
+    """Request to directly link a Telegram Chat ID without verification code."""
+    chat_id: str  # Numeric Telegram Chat ID (e.g., "123456789")
+    firebase_token: str  # Firebase token for user verification
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _profile_dict(user: User) -> dict:
@@ -308,6 +314,81 @@ async def verify_telegram_link(body: TelegramVerifyRequest, db: AsyncSession = D
     )
 
     return {"success": True, "message": "Telegram account linked successfully"}
+
+
+@profile_router.post("/telegram/link-chat-id")
+async def link_telegram_chat_id(
+    body: TelegramLinkChatIdRequest,
+    db: AsyncSession = Depends(get_db),
+    _token: dict = Depends(verify_firebase_token),
+):
+    """
+    Direct Chat ID linking endpoint.
+    User provides their Telegram Chat ID (from @getidsbot) and firebase token.
+    Automatically links the Chat ID to their account.
+    
+    Flow:
+    1. User opens @getidsbot in Telegram
+    2. Gets their numeric Chat ID (e.g., 123456789)
+    3. Pastes it in frontend form
+    4. Frontend calls this endpoint with chat_id + firebase_token
+    5. Backend verifies token, saves chat_id, sends confirmation
+    """
+    from telegram_service import telegram_service
+
+    # Get user ID from Firebase token
+    user_id = _token.get("uid", "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid Firebase token")
+
+    # Validate chat_id format (must be numeric)
+    if not body.chat_id.strip().isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="Chat ID must contain only numbers (e.g., 123456789)"
+        )
+
+    chat_id = body.chat_id.strip()
+
+    # Find or create user
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        # Create minimal user record if doesn't exist
+        user = User(
+            id=user_id,
+            email=_token.get("email", ""),
+            username=_token.get("name", f"user_{user_id[:8]}"),
+            user_type="citizen",
+        )
+        db.add(user)
+
+    # Save the Chat ID
+    user.telegram_chat_id = chat_id
+
+    await db.commit()
+    await db.refresh(user)
+
+    # Send confirmation message to user's Telegram
+    try:
+        await telegram_service.send_message(
+            chat_id,
+            "✅ <b>Suraksha Setu Connected!</b>\n\n"
+            "Your Telegram account is now linked to Suraksha Setu.\n\n"
+            "You will receive disaster alerts for your location.\n\n"
+            "Stay safe! 🛡️",
+        )
+    except Exception as e:
+        logger.warning(f"Could not send confirmation to Chat ID {chat_id}: {e}")
+        # Don't fail the request if we can't send the message
+        pass
+
+    return {
+        "success": True,
+        "chat_id": chat_id,
+        "message": "Telegram Chat ID linked successfully!"
+    }
 
 
 @profile_router.delete("/{user_id}/telegram-unlink")
