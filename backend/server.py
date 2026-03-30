@@ -890,63 +890,165 @@ app.include_router(telegram_router)
 
 
 # ── Telegram Bot Webhook ──────────────────────────────────────────────────────
+# Production webhook setup docs at: docs/TELEGRAM_WEBHOOK_SETUP.md
+# Webhook endpoint handles: auto-linking buttons, manual codes, callback queries
 
 @app.post("/api/telegram/webhook", include_in_schema=False)
 async def telegram_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """
-    Telegram Bot webhook endpoint.
-    Receives updates from Telegram and handles /start <CODE> for account linking.
-    Register this URL with BotFather: POST https://api.telegram.org/bot<TOKEN>/setWebhook?url=<HOST>/api/telegram/webhook
+    Telegram Bot webhook endpoint (production-ready).
+    
+    Handles:
+    1. /start <CODE> — Manual linking with code
+    2. /start — Auto-linking button flow
+    3. Callback queries — Button click responses (approve/cancel linking)
+    4. Webhook secret verification (if configured)
+    
+    Security:
+    - Verifies X-Telegram-Bot-Api-Secret-Token header (if TELEGRAM_WEBHOOK_SECRET set)
+    - Returns 200 OK to Telegram within 25 seconds
+    - Processes all message types, returns early if not relevant
+    
+    Register webhook with BotFather:
+    POST https://api.telegram.org/bot<TOKEN>/setWebhook
+      ?url=https://your-domain.com/api/telegram/webhook
+      &secret_token=<RANDOM_SECRET>
     """
     try:
         from telegram_service import telegram_service
         from sqlalchemy import select
         from database import User
         import re
+        import json
+
+        # 1. Optional: Verify webhook secret header
+        secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        if not telegram_service.verify_webhook_secret(secret_token):
+            logger.warning("[Telegram Webhook] Invalid secret token")
+            return {"ok": True}  # Still return 200 but don't process
 
         update = await request.json()
+        update_id = update.get("update_id", 0)
+
+        # ── Handle /start command with code or auto-link request ──────────────
+        
         message = update.get("message", {})
-        text = (message.get("text") or "").strip()
-        chat = message.get("chat", {})
-        chat_id = str(chat.get("id", ""))
-        from_user = message.get("from", {})
-        tg_username = from_user.get("username", "")
+        if message:
+            text = (message.get("text") or "").strip()
+            chat = message.get("chat", {})
+            chat_id = str(chat.get("id", ""))
+            from_user = message.get("from", {})
+            tg_username = from_user.get("username", "")
 
-        # Handle /start <CODE> for account linking
-        m = re.match(r"^/start\s+([A-Za-z0-9]+)$", text)
-        if m and chat_id:
-            code = m.group(1)
-            # Find which user has this code: brute-force check all users who have
-            # a pending link code by matching via verify_link_code
-            result = await db.execute(select(User).where(User.is_active == True))
-            users = result.scalars().all()
-            matched_user = None
-            for u in users:
-                if telegram_service.verify_link_code(u.id, code):
-                    matched_user = u
-                    break
+            # Check for /start <CODE> (manual code-based linking)
+            code_match = re.match(r"^/start\s+([A-Za-z0-9]+)$", text)
+            if code_match and chat_id:
+                code = code_match.group(1)
+                result = await db.execute(select(User).where(User.is_active == True))
+                users = result.scalars().all()
+                matched_user = None
+                
+                for u in users:
+                    if telegram_service.verify_link_code(u.id, code):
+                        matched_user = u
+                        break
 
-            if matched_user:
-                matched_user.telegram_chat_id = chat_id
-                if tg_username:
-                    matched_user.telegram_username = tg_username
-                await db.commit()
-                await telegram_service.send_message(
-                    chat_id,
-                    "✅ <b>Suraksha Setu Connected!</b>\n\n"
-                    "You will now receive disaster alerts for your location.\n\n"
-                    "Stay safe! 🛡️",
+                if matched_user:
+                    matched_user.telegram_chat_id = chat_id
+                    if tg_username:
+                        matched_user.telegram_username = tg_username
+                    await db.commit()
+                    await telegram_service.send_message(
+                        chat_id,
+                        "✅ <b>Suraksha Setu Connected!</b>\n\n"
+                        "Your Telegram account is now linked.\n"
+                        "You'll receive disaster alerts for your location.\n\n"
+                        "Stay safe! 🛡️",
+                    )
+                    logger.info(f"[Telegram] Linked chat_id={chat_id} to user={matched_user.id} via code")
+                else:
+                    await telegram_service.send_message(
+                        chat_id,
+                        "❌ Invalid or expired link code.\n\n"
+                        "Please generate a new code from your Suraksha Setu profile.\n"
+                        "Or click 'Enable Alerts' to auto-link now!",
+                    )
+                return {"ok": True}
+
+            # Check for plain /start (show auto-link buttons)
+            if text == "/start" and chat_id:
+                await telegram_service.start_auto_linking(chat_id, tg_username)
+                logger.info(f"[Telegram] Started auto-linking for chat_id={chat_id}")
+                return {"ok": True}
+
+        # ── Handle callback query (button clicks) ─────────────────────────────
+        
+        callback_query = update.get("callback_query", {})
+        if callback_query:
+            callback_id = callback_query.get("id")
+            from_user = callback_query.get("from", {})
+            chat_id = str(from_user.get("id", ""))
+            tg_username = from_user.get("username", "")
+            message = callback_query.get("message", {})
+            message_id = message.get("message_id")
+            callback_data = callback_query.get("data", "")
+
+            logger.info(f"[Telegram] Callback: {callback_data} from chat_id={chat_id}")
+
+            # Auto-linking approval
+            if callback_data == "auto_link:approve" and chat_id:
+                # Try to find user by Telegram username first
+                result = await db.execute(
+                    select(User).where(User.telegram_username == tg_username)
                 )
-                logger.info(f"[Telegram] Linked chat_id={chat_id} to user={matched_user.id}")
-            else:
-                await telegram_service.send_message(
-                    chat_id,
-                    "❌ Invalid or expired link code.\n\n"
-                    "Please generate a new code from your Suraksha Setu profile.",
+                user = result.scalar_one_or_none()
+
+                if user:
+                    # User exists and matches Telegram username
+                    user.telegram_chat_id = chat_id
+                    if tg_username:
+                        user.telegram_username = tg_username
+                    await db.commit()
+                    
+                    await telegram_service.answer_callback_query(
+                        callback_id,
+                        "✅ Linked successfully!",
+                        show_alert=False
+                    )
+                    
+                    await telegram_service.send_message(
+                        chat_id,
+                        "✅ <b>Suraksha Setu Connected!</b>\n\n"
+                        "Your account is linked and active.\n"
+                        "Disaster alerts for your location will now be sent here.\n\n"
+                        "🔔 Enable notifications to never miss an alert!\n"
+                        "Stay safe! 🛡️",
+                    )
+                    logger.info(f"[Telegram] Auto-linked chat_id={chat_id} to user={user.id}")
+                else:
+                    # No user found, show instructions
+                    await telegram_service.answer_callback_query(
+                        callback_id,
+                        "To auto-link, first create a Suraksha Setu account with this Telegram username!",
+                        show_alert=True
+                    )
+                    logger.info(f"[Telegram] No user found for telegram_username={tg_username}")
+
+            # Auto-linking cancellation
+            elif callback_data == "auto_link:cancel" and chat_id:
+                await telegram_service.answer_callback_query(
+                    callback_id,
+                    "Cancelled. You can always link later from the app profile.",
+                    show_alert=False
                 )
+                logger.info(f"[Telegram] User cancelled auto-linking: chat_id={chat_id}")
+
+            return {"ok": True}
+
     except Exception as exc:
-        logger.warning(f"[Telegram Webhook] Error: {exc}")
-    # Always return 200 to Telegram
+        logger.warning(f"[Telegram Webhook] Error processing update: {exc}", exc_info=True)
+    
+    # Always return 200 OK to Telegram (acknowledgement, not response)
     return {"ok": True}
 
 

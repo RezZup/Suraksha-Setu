@@ -2,13 +2,21 @@
 Telegram Bot Notification Service
 ──────────────────────────────────
 • Sends proximity-based disaster alerts via Telegram Bot API.
-• Provides a link-code flow so users can connect their Telegram account.
-• Telegram bot webhook handler registers chat_id → user mapping.
+• Provides automatic Chat ID linking via webhook + inline buttons.
+• Supports both manual (code-based) and automatic (button-based) linking.
 
 Setup:
   1. Create a bot via @BotFather → get TELEGRAM_BOT_TOKEN
   2. Set TELEGRAM_BOT_USERNAME (e.g. SurakshaSetu_bot)
   3. Set your webhook URL: https://api.telegram.org/bot<TOKEN>/setWebhook?url=<BACKEND_URL>/api/telegram/webhook
+  4. Optional: Save your backend secret in TELEGRAM_WEBHOOK_SECRET for extra security
+  5. For production: Use HTTPS webhook URL and keep secret tokens in .env
+
+Webhook Security:
+  - All requests from Telegram include update_id
+  - Optional: Verify X-Telegram-Bot-Api-Secret-Token header (if set in setWebhook)
+  - Webhook automatically retries failed requests
+  - Always return 200 OK within 25 seconds
 """
 import os
 import logging
@@ -24,7 +32,9 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "SurakshaSetu_bot")
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 DEFAULT_ALERT_RADIUS_KM = float(os.getenv("DEFAULT_ALERT_RADIUS_KM", "50"))
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -211,6 +221,173 @@ class TelegramService:
         return sent_count
 
     # ── Telegram Mini App validation ──────────────────────────────────────────
+
+    # ── Message with inline keyboards ────────────────────────────────────────
+
+    async def send_message_with_buttons(
+        self,
+        chat_id: str,
+        text: str,
+        buttons: List[List[Dict[str, str]]],
+        parse_mode: str = "HTML"
+    ) -> bool:
+        """
+        Send a message with inline keyboard (buttons).
+        
+        Args:
+            chat_id: Telegram Chat ID
+            text: Message text
+            buttons: List of button rows, each row is a list of button dicts:
+                    [{"text": "Label", "callback_data": "action_id"}]
+            parse_mode: "HTML" or "Markdown"
+        
+        Example:
+            buttons = [
+                [{"text": "✅ Enable Alerts", "callback_data": "link:approve"}],
+                [{"text": "❌ Cancel", "callback_data": "link:cancel"}]
+            ]
+        """
+        if not self.enabled or not chat_id:
+            return False
+        try:
+            inline_keyboard = {
+                "inline_keyboard": buttons
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{self._base}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": text,
+                        "parse_mode": parse_mode,
+                        "reply_markup": inline_keyboard,
+                    },
+                )
+                data = resp.json()
+                if not data.get("ok"):
+                    logger.warning("Telegram send failed (chat=%s): %s", chat_id, data.get("description"))
+                    return False
+            return True
+        except Exception as exc:
+            logger.error("Telegram send_with_buttons error: %s", exc)
+            return False
+
+    async def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str = "",
+        show_alert: bool = False
+    ) -> bool:
+        """
+        Answer a callback query (respond to button clicks).
+        
+        Args:
+            callback_query_id: ID from update.callback_query
+            text: Notification text (shows as toast if not show_alert)
+            show_alert: If True, shows as popup alert
+        """
+        if not self.enabled or not callback_query_id:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{self._base}/answerCallbackQuery",
+                    json={
+                        "callback_query_id": callback_query_id,
+                        "text": text,
+                        "show_alert": show_alert,
+                    },
+                )
+                data = resp.json()
+                if not data.get("ok"):
+                    logger.warning("Telegram answerCallbackQuery failed: %s", data.get("description"))
+                    return False
+            return True
+        except Exception as exc:
+            logger.error("Telegram answerCallbackQuery error: %s", exc)
+            return False
+
+    async def edit_message_text(
+        self,
+        chat_id: str,
+        message_id: int,
+        text: str,
+        parse_mode: str = "HTML"
+    ) -> bool:
+        """Edit an existing message text."""
+        if not self.enabled or not chat_id or not message_id:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{self._base}/editMessageText",
+                    json={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "text": text,
+                        "parse_mode": parse_mode,
+                    },
+                )
+                data = resp.json()
+                if not data.get("ok"):
+                    logger.warning("Telegram editMessageText failed: %s", data.get("description"))
+                    return False
+            return True
+        except Exception as exc:
+            logger.error("Telegram editMessageText error: %s", exc)
+            return False
+
+    # ── Webhook signature verification ───────────────────────────────────────
+
+    def verify_webhook_secret(self, secret_token: Optional[str]) -> bool:
+        """
+        Verify webhook secret token (if configured).
+        
+        When you set a webhook with BotFather:
+          POST https://api.telegram.org/bot<TOKEN>/setWebhook
+          ?url=<URL>&secret_token=<TOKEN>
+        
+        Telegram will send X-Telegram-Bot-Api-Secret-Token header with every update.
+        We use this to verify requests are genuinely from Telegram.
+        """
+        if not TELEGRAM_WEBHOOK_SECRET:
+            # No secret configured, skip verification
+            return True
+        
+        # Verify the secret token matches
+        return secret_token == TELEGRAM_WEBHOOK_SECRET
+
+    # ── Session management for auto-linking ──────────────────────────────────
+
+    def _get_linking_session_key(self, chat_id: str) -> str:
+        """Generate a session key for auto-linking state."""
+        return f"tg:linking:{chat_id}"
+
+    async def start_auto_linking(self, chat_id: str, telegram_username: str = "") -> bool:
+        """
+        Start auto-linking flow for a user via button click.
+        Sends a message with inline buttons for user to confirm linking.
+        """
+        if not self.enabled or not chat_id:
+            return False
+        
+        buttons = [
+            [{"text": "✅ Enable Disaster Alerts", "callback_data": "auto_link:approve"}],
+            [{"text": "❌ Not Now", "callback_data": "auto_link:cancel"}],
+        ]
+        
+        text = (
+            "🔗 <b>Suraksha Setu Linking</b>\n\n"
+            "Connect your Telegram account to receive live disaster alerts "
+            "for your location.\n\n"
+            "We'll send you:\n"
+            "• 🚨 Real-time emergency warnings\n"
+            "• 📍 Location-specific alerts\n"
+            "• ☔ Weather & safety updates\n\n"
+            "Ready to get protected?"
+        )
+        
+        return await self.send_message_with_buttons(chat_id, text, buttons)
 
     def validate_mini_app_data(self, init_data: str) -> Optional[Dict[str, Any]]:
         """
