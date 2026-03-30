@@ -469,7 +469,7 @@ const EnhancedAIChatInterface = () => {
   };
 
   const quickPrompts = [
-    { icon: '�️', text: 'Today\'s weather', color: 'from-blue-500 to-cyan-500', shortText: 'Weather' },
+    { icon: '🌤️', text: 'Today\'s weather', color: 'from-blue-500 to-cyan-500', shortText: 'Weather' },
     { icon: '💨', text: 'Air quality now', color: 'from-green-500 to-emerald-500', shortText: 'AQI' },
     { icon: '🌊', text: 'Flood safety tips', color: 'from-cyan-500 to-blue-600', shortText: 'Flood' },
     { icon: '⚡', text: 'Emergency kit list', color: 'from-orange-500 to-red-500', shortText: 'Kit' },
@@ -517,9 +517,9 @@ const EnhancedAIChatInterface = () => {
         </Avatar>
         <div className={`flex-1 max-w-[85%] md:max-w-[75%] ${isBot ? '' : 'flex flex-col items-end'}`}>
           <div
-            className={`rounded-2xl px-4 py-2.5 ${isBot
-              ? 'bg-muted text-foreground border border-border'
-              : 'bg-primary text-primary-foreground'
+            className={`rounded-2xl px-4 py-2.5 shadow-sm ${isBot
+              ? 'bg-white/90 dark:bg-slate-900/80 text-foreground border border-cyan-100 dark:border-cyan-900/50'
+              : 'bg-gradient-to-r from-cyan-600 to-emerald-600 text-white border border-cyan-500/30'
               }`}
           >
             <div className={`text-[13px] leading-relaxed ${isBot ? 'space-y-1' : ''}`}>
@@ -549,22 +549,25 @@ const EnhancedAIChatInterface = () => {
   };
 
   return (
-    <Card className={`w-full ${isExpanded ? 'h-[700px]' : 'h-[550px]'} flex flex-col shadow-sm border border-border overflow-hidden transition-all duration-300 bg-card`}>
-      {/* Clean Header */}
-      <CardHeader className="bg-card border-b border-border pb-3 pt-3 px-4 shrink-0">
+    <Card className={`w-full ${isExpanded ? 'h-[700px]' : 'h-[550px]'} flex flex-col shadow-xl border border-cyan-200/40 dark:border-cyan-900/40 overflow-hidden transition-all duration-300 bg-gradient-to-b from-slate-50 to-white dark:from-slate-900 dark:to-slate-950`}>
+      {/* Immersive Header */}
+      <CardHeader className="bg-gradient-to-r from-slate-900 via-cyan-900 to-emerald-900 text-white border-b border-white/10 pb-3 pt-3 px-4 shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="relative">
-              <div className="w-11 h-11 rounded-xl bg-primary/10 flex items-center justify-center p-2">
+              <div className="w-11 h-11 rounded-xl bg-white/10 border border-white/20 backdrop-blur-sm flex items-center justify-center p-2">
                 <img src="/ai_logo.png" alt="Suraksha AI" className="h-full w-full object-contain" />
               </div>
-              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 bg-green-500 rounded-full border-2 border-card"></span>
+              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 bg-emerald-400 rounded-full border-2 border-slate-900"></span>
             </div>
             <div>
-              <CardTitle className="text-base font-semibold tracking-tight text-foreground">
+              <CardTitle className="text-base font-semibold tracking-tight text-white">
                 Suraksha AI
               </CardTitle>
-              <p className="text-[11px] text-muted-foreground">Safety Assistant</p>
+              <div className="flex items-center gap-2 mt-1">
+                <p className="text-[11px] text-cyan-100/90">Safety Assistant</p>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/15 border border-white/25">Live</span>
+              </div>
             </div>
           </div>
           <div className="flex gap-1">
@@ -581,8 +584,8 @@ const EnhancedAIChatInterface = () => {
                 }
               }}
               className={`h-8 w-8 rounded-lg transition-all ${voiceMode
-                ? 'bg-green-500/15 text-green-600 hover:bg-green-500/25'
-                : 'text-muted-foreground hover:text-foreground'
+                ? 'bg-emerald-400/20 text-emerald-200 hover:bg-emerald-400/30'
+                : 'text-slate-300 hover:text-white'
                 }`}
               title={voiceMode ? "Voice Mode: ON" : "Voice Mode: OFF"}
             >
@@ -593,7 +596,7 @@ const EnhancedAIChatInterface = () => {
                 variant="ghost"
                 size="icon"
                 onClick={stopSpeaking}
-                className="h-8 w-8 text-muted-foreground hover:text-foreground rounded-lg"
+                className="h-8 w-8 text-slate-300 hover:text-white rounded-lg"
               >
                 <VolumeX className="h-4 w-4" />
               </Button>
@@ -602,7 +605,7 @@ const EnhancedAIChatInterface = () => {
               variant="ghost"
               size="icon"
               onClick={() => setIsExpanded(!isExpanded)}
-              className="h-8 w-8 text-muted-foreground hover:text-foreground rounded-lg"
+              className="h-8 w-8 text-slate-300 hover:text-white rounded-lg"
             >
               {isExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
             </Button>
@@ -612,7 +615,7 @@ const EnhancedAIChatInterface = () => {
 
       <CardContent className="flex-1 flex flex-col p-0 space-y-0 overflow-hidden">
         {/* Quick Action Chips */}
-        <div className="px-4 pt-3 pb-2 border-b border-border shrink-0">
+        <div className="px-4 pt-3 pb-2 border-b border-cyan-100 dark:border-cyan-900/40 shrink-0 bg-white/70 dark:bg-slate-900/40 backdrop-blur-sm">
           <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
             <AnimatePresence>
               {quickPrompts.map((prompt, i) => (
@@ -624,7 +627,11 @@ const EnhancedAIChatInterface = () => {
                   whileTap={{ scale: 0.97 }}
                   transition={{ delay: i * 0.03 }}
                   onClick={() => setInputValue(prompt.text)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium whitespace-nowrap transition-colors bg-muted hover:bg-muted/80 text-foreground border border-border"
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-all border shadow-sm ${
+                    i % 2 === 0
+                      ? 'bg-cyan-50 text-cyan-900 border-cyan-200 hover:bg-cyan-100 dark:bg-cyan-950/30 dark:text-cyan-100 dark:border-cyan-900'
+                      : 'bg-emerald-50 text-emerald-900 border-emerald-200 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:text-emerald-100 dark:border-emerald-900'
+                  }`}
                 >
                   <span className="text-sm">{prompt.icon}</span>
                   <span className="hidden md:inline">{prompt.shortText}</span>
@@ -635,7 +642,7 @@ const EnhancedAIChatInterface = () => {
         </div>
 
         {/* Messages Area */}
-        <ScrollArea ref={scrollAreaRef} className="flex-1 px-4">
+        <ScrollArea ref={scrollAreaRef} className="flex-1 px-4 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.08),transparent_55%)] dark:bg-[radial-gradient(circle_at_top,rgba(16,185,129,0.12),transparent_55%)]">
           <div className="space-y-3 py-4">
             <AnimatePresence>
               {messages.map((message) => (
@@ -654,11 +661,11 @@ const EnhancedAIChatInterface = () => {
                     <Bot className="h-4 w-4" />
                   </AvatarFallback>
                 </Avatar>
-                <div className="bg-muted rounded-2xl px-4 py-3 border border-border">
+                <div className="bg-white/90 dark:bg-slate-900/80 rounded-2xl px-4 py-3 border border-cyan-100 dark:border-cyan-900/50 shadow-sm">
                   <div className="flex gap-1.5">
-                    <div className="w-1.5 h-1.5 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <div className="w-1.5 h-1.5 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <div className="w-1.5 h-1.5 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                    <div className="w-1.5 h-1.5 bg-cyan-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <div className="w-1.5 h-1.5 bg-cyan-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                   </div>
                 </div>
               </motion.div>
@@ -667,7 +674,7 @@ const EnhancedAIChatInterface = () => {
         </ScrollArea>
 
         {/* Input Area */}
-        <div className="p-4 bg-card border-t border-border shrink-0">
+        <div className="p-4 bg-white/80 dark:bg-slate-900/70 border-t border-cyan-100 dark:border-cyan-900/40 shrink-0 backdrop-blur-sm">
           {isRecording && (
             <div className="mb-2 text-xs text-muted-foreground">
               Listening: {liveTranscript || '...'}

@@ -94,11 +94,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+_cors_env = os.getenv("CORS_ORIGINS", "").strip()
+CORS_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -654,16 +661,72 @@ class PhoneRegistrationRequest(PydanticBaseModel):
     phone: str
     email: str = ""
     name: str = ""
+    lat: float | None = None
+    lon: float | None = None
+    pincode: str | None = None
+    city: str | None = None
+    state: str | None = None
 
 @api_router.post("/users/register-phone")
-async def register_phone(req: PhoneRegistrationRequest):
-    """Register a phone number for SMS alerts."""
+async def register_phone(req: PhoneRegistrationRequest, db: AsyncSession = Depends(get_db)):
+    """Register a phone number for SMS alerts (in-memory + DB persistence)."""
+    from database import User
+
+    normalized_phone = sms_service._normalize_e164(req.phone)
     phone_registry.register(
         uid=req.uid,
-        phone=req.phone,
+        phone=normalized_phone,
         email=req.email,
         name=req.name,
+        location={
+            "lat": req.lat,
+            "lon": req.lon,
+            "gps_pincode": req.pincode,
+            "city": req.city,
+            "state": req.state,
+        },
     )
+
+    # Persist phone + location snapshot so proximity filters survive server restarts.
+    result = await db.execute(select(User).where(User.id == req.uid))
+    user = result.scalar_one_or_none()
+    if not user:
+        base_email = (req.email or f"{req.uid}@firebase.local").strip().lower()
+        username = base_email.split("@")[0]
+        dup = await db.execute(select(User).where(User.username == username))
+        if dup.scalar_one_or_none():
+            username = f"{username}_{req.uid[:6]}"
+        user = User(
+            id=req.uid,
+            email=base_email,
+            username=username,
+            password_hash="firebase_auth",
+            full_name=(req.name or username).strip(),
+            user_type="citizen",
+            is_active=True,
+        )
+        db.add(user)
+
+    user.phone = normalized_phone
+    if req.email:
+        user.email = req.email.strip().lower()
+    if req.name:
+        user.full_name = req.name.strip()
+    loc = dict(user.location or {})
+    if req.lat is not None:
+        loc["lat"] = float(req.lat)
+    if req.lon is not None:
+        loc["lon"] = float(req.lon)
+    if req.pincode:
+        loc["gps_pincode"] = req.pincode.strip()
+    if req.city:
+        loc["city"] = req.city.strip()
+    if req.state:
+        loc["state"] = req.state.strip()
+    if loc:
+        user.location = loc
+    await db.commit()
+
     return {"success": True, "registered": phone_registry.count}
 
 
@@ -683,6 +746,7 @@ async def sms_status():
     """Check SMS service availability and thresholds."""
     return {
         "twilio_available": sms_service.is_available,
+        "twilio_whatsapp_available": sms_service.is_whatsapp_available,
         "registered_phones": phone_registry.count,
         "thresholds": {
             "auto_notify": 0.70,

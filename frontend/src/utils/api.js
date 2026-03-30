@@ -1,23 +1,23 @@
+import { cachedFetchJson } from '@/utils/requestCache';
+
 const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api';
 
 // Default API client (axios-like)
 const api = {
   get: async (url, config = {}) => {
-    const response = await fetch(`${API_URL.replace('/api', '')}${url}`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        ...config.headers,
+    const data = await cachedFetchJson(`${API_URL.replace('/api', '')}${url}`, {
+      ttlMs: config.ttlMs ?? 60 * 1000,
+      forceRefresh: Boolean(config.forceRefresh),
+      fetchOptions: {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          ...config.headers,
+        },
       },
-      ...config
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-      throw new Error(error.detail || 'Request failed');
-    }
-
-    return { data: await response.json() };
+    return { data };
   },
 
   post: async (url, data, config = {}) => {

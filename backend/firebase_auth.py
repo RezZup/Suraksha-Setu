@@ -53,6 +53,7 @@ initialize_firebase()
 
 # Security scheme
 security = HTTPBearer()
+security_optional = HTTPBearer(auto_error=False)
 
 async def verify_firebase_token(
     credentials: HTTPAuthorizationCredentials = Security(security)
@@ -138,7 +139,7 @@ async def get_current_user(
     return user_info
 
 async def get_optional_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security, auto_error=False)
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security_optional)
 ) -> Optional[dict]:
     """
     Get current user if authenticated, None otherwise

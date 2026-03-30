@@ -6,18 +6,18 @@
 .student-chat {
   display: flex;
   flex-direction: column;
-  height: 480px;
-  border-radius: 16px;
+  height: 500px;
+  border-radius: 18px;
   overflow: hidden;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08), 0 1px 4px rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(34, 197, 94, 0.15);
-  background: var(--card, #fff);
-  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  box-shadow: 0 14px 34px rgba(14, 116, 144, 0.12), 0 2px 8px rgba(14, 116, 144, 0.08);
+  border: 1px solid rgba(14, 165, 233, 0.22);
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(255, 255, 255, 1) 100%);
+  font-family: 'Nunito', 'Segoe UI', system-ui, sans-serif;
 }
 
 /* ─── Header ─── */
 .student-chat__header {
-  background: linear-gradient(135deg, #16a34a 0%, #22c55e 50%, #4ade80 100%);
+  background: linear-gradient(120deg, #0f766e 0%, #0891b2 45%, #2563eb 100%);
   padding: 14px 18px;
   display: flex;
   align-items: center;
@@ -30,7 +30,8 @@
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.32);
   backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
@@ -51,6 +52,18 @@
   opacity: 0.85;
 }
 
+.student-chat__header-badge {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 5px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  background: rgba(255, 255, 255, 0.16);
+}
+
 /* ─── Messages ─── */
 .student-chat__messages {
   flex: 1;
@@ -60,7 +73,7 @@
   flex-direction: column;
   gap: 12px;
   scroll-behavior: smooth;
-  background: var(--background, #fafafa);
+  background: radial-gradient(circle at top, rgba(6, 182, 212, 0.08), transparent 52%), var(--background, #fafafa);
 }
 
 .student-chat__messages::-webkit-scrollbar {
@@ -68,7 +81,7 @@
 }
 
 .student-chat__messages::-webkit-scrollbar-thumb {
-  background: rgba(34, 197, 94, 0.2);
+  background: rgba(14, 165, 233, 0.24);
   border-radius: 4px;
 }
 
@@ -98,14 +111,15 @@
 }
 
 .student-chat__msg--user .student-chat__bubble {
-  background: linear-gradient(135deg, #16a34a, #22c55e);
+  background: linear-gradient(135deg, #0f766e, #0284c7);
   color: #fff;
   border-bottom-right-radius: 4px;
 }
 
 .student-chat__msg--bot .student-chat__bubble {
-  background: var(--muted, #f4f4f5);
+  background: rgba(255, 255, 255, 0.86);
   color: var(--foreground, #111);
+  border: 1px solid rgba(6, 182, 212, 0.14);
   border-bottom-left-radius: 4px;
 }
 
@@ -123,8 +137,8 @@
 }
 
 .student-chat__confidence--high {
-  background: rgba(34, 197, 94, 0.12);
-  color: #16a34a;
+  background: rgba(6, 182, 212, 0.12);
+  color: #0e7490;
 }
 
 .student-chat__confidence--medium {
@@ -150,28 +164,28 @@
   padding: 8px 16px;
   overflow-x: auto;
   flex-shrink: 0;
-  border-top: 1px solid rgba(34, 197, 94, 0.08);
+  border-top: 1px solid rgba(14, 165, 233, 0.14);
   background: var(--card, #fff);
 }
 
 .student-chat__quick-btn {
   padding: 6px 14px;
   border-radius: 20px;
-  border: 1px solid rgba(34, 197, 94, 0.25);
-  background: rgba(34, 197, 94, 0.04);
+  border: 1px solid rgba(14, 165, 233, 0.28);
+  background: rgba(14, 165, 233, 0.06);
   font-size: 12px;
   font-weight: 500;
-  color: #16a34a;
+  color: #0c4a6e;
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.2s ease;
 }
 
 .student-chat__quick-btn:hover {
-  background: rgba(34, 197, 94, 0.12);
-  border-color: #22c55e;
+  background: rgba(14, 165, 233, 0.14);
+  border-color: #0ea5e9;
   transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(34, 197, 94, 0.15);
+  box-shadow: 0 2px 8px rgba(14, 165, 233, 0.2);
 }
 
 /* ─── Input area ─── */
@@ -198,8 +212,8 @@
 }
 
 .student-chat__input:focus {
-  border-color: #22c55e;
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.1);
+  border-color: #0ea5e9;
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.12);
 }
 
 .student-chat__send-btn {
@@ -207,7 +221,7 @@
   height: 38px;
   border-radius: 12px;
   border: none;
-  background: linear-gradient(135deg, #16a34a, #22c55e);
+  background: linear-gradient(135deg, #0f766e, #0284c7);
   color: #fff;
   cursor: pointer;
   display: flex;
@@ -219,7 +233,7 @@
 
 .student-chat__send-btn:hover:not(:disabled) {
   transform: scale(1.05);
-  box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3);
+  box-shadow: 0 4px 12px rgba(14, 165, 233, 0.3);
 }
 
 .student-chat__send-btn:disabled {
@@ -244,8 +258,8 @@
 }
 
 .student-chat__mic-btn:hover {
-  border-color: #22c55e;
-  color: #16a34a;
+  border-color: #0ea5e9;
+  color: #0284c7;
 }
 
 .student-chat__mic-btn--recording {
@@ -271,7 +285,7 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #16a34a;
+  background: #0284c7;
   animation: typingBounce 1.4s infinite ease-in-out;
 }
 
@@ -280,8 +294,8 @@
 
 /* ─── Quiz card ─── */
 .student-chat__quiz {
-  background: linear-gradient(135deg, rgba(34, 197, 94, 0.06), rgba(59, 130, 246, 0.06));
-  border: 1px solid rgba(34, 197, 94, 0.15);
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.08), rgba(59, 130, 246, 0.08));
+  border: 1px solid rgba(14, 165, 233, 0.2);
   border-radius: 12px;
   padding: 14px;
   margin-top: 6px;
@@ -291,7 +305,7 @@
   margin: 0 0 10px;
   font-size: 13px;
   font-weight: 700;
-  color: #16a34a;
+  color: #0369a1;
 }
 
 .student-chat__quiz-question {
@@ -319,14 +333,21 @@
 }
 
 .student-chat__quiz-option:hover {
-  border-color: #22c55e;
-  background: rgba(34, 197, 94, 0.04);
+  border-color: #0ea5e9;
+  background: rgba(14, 165, 233, 0.06);
 }
 
 .student-chat__quiz-option--correct {
-  border-color: #22c55e;
-  background: rgba(34, 197, 94, 0.1);
-  color: #16a34a;
+  border-color: #0ea5e9;
+  background: rgba(14, 165, 233, 0.1);
+  color: #0369a1;
+  font-weight: 600;
+}
+
+.student-chat__cache-hint {
+  margin-top: 6px;
+  font-size: 10px;
+  color: #0369a1;
   font-weight: 600;
 }
 

@@ -54,6 +54,7 @@ const Community = () => {
   const [filteredPosts, setFilteredPosts] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState('all');
+  const [hideResolved, setHideResolved] = useState(true);
   const [sortBy, setSortBy] = useState('recent');
   const [activeTab, setActiveTab] = useState('feed');
   const [loading, setLoading] = useState(true);
@@ -173,6 +174,11 @@ const Community = () => {
       filtered = filtered.filter(post => post.type === filterType);
     }
 
+    // Optionally hide resolved posts from the feed by default
+    if (hideResolved) {
+      filtered = filtered.filter(post => !post.is_resolved);
+    }
+
     // Apply search
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase();
@@ -201,7 +207,7 @@ const Community = () => {
     }
 
     setFilteredPosts(filtered);
-  }, [posts, filterType, searchQuery, sortBy]);
+  }, [posts, filterType, hideResolved, searchQuery, sortBy]);
 
   const handlePostCreated = async (newPost) => {
     try {
@@ -408,6 +414,18 @@ const Community = () => {
                     {label}
                   </button>
                 ))}
+                <button
+                  onClick={() => setHideResolved((v) => !v)}
+                  className={cn(
+                    'px-3 py-1.5 rounded-full text-xs font-semibold border transition-all',
+                    hideResolved
+                      ? 'bg-emerald-600 text-white border-transparent shadow-sm'
+                      : 'bg-muted/50 text-muted-foreground border-border hover:bg-muted'
+                  )}
+                  title={hideResolved ? 'Showing only active posts' : 'Showing active and resolved posts'}
+                >
+                  {hideResolved ? '✅ Hide Resolved' : '📂 Show Resolved'}
+                </button>
               </div>
 
               {/* Bottom row: sort + pincode */}

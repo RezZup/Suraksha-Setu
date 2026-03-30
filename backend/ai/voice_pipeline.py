@@ -12,7 +12,6 @@ from pathlib import Path
 
 from ai.openai_client import ai_client
 from ai.sarvam_client import sarvam_client
-from ai.colab_client import colab_client
 
 logger = logging.getLogger(__name__)
 
@@ -69,21 +68,7 @@ async def process_voice_query(
         # 2. Normalise
         normalised = await _normalize_audio(temp_path)
 
-        # 3. Optional fast path: delegate full voice processing to Colab.
-        if colab_client.enabled:
-            colab_result = await colab_client.process_voice(
-                file_path=normalised,
-                role=role,
-                language=language,
-                context=context or {},
-            )
-            if not colab_result.get("error") and colab_result.get("response"):
-                if not colab_result.get("transcript"):
-                    colab_result["transcript"] = ""
-                return colab_result
-            logger.info("Colab voice provider unavailable, using local fallback chain")
-
-        # 4. Transcribe -- Sarvam Saarika first (cheap), Whisper fallback
+        # 3. Transcribe -- Sarvam Saarika first (cheap), Whisper fallback
         transcript_result = None
         detected_language = language or "unknown"
 

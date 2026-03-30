@@ -7,6 +7,7 @@ import asyncio
 import logging
 from typing import Dict, List, Optional
 from datetime import datetime, timezone
+import uuid
 import aiohttp
 from database import AsyncSessionLocal, MOSDACMetadata
 import os
@@ -107,6 +108,7 @@ class MOSDACMetadataPoller:
                     continue
                 
                 metadata_entry = MOSDACMetadata(
+                    id=str(uuid.uuid4()),
                     product_id=record["product_id"],
                     identifier=record["identifier"],
                     dataset_id=record["dataset_id"],

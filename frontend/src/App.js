@@ -22,6 +22,7 @@ import StudentPortal from "@/pages/StudentPortal";
 import ScientistPortal from "@/pages/ScientistPortal";
 import AdminDashboard from "@/pages/AdminDashboard";
 import CriticalContacts from "@/pages/CriticalContacts";
+import Profile from "@/pages/Profile";
 
 function App() {
   return (
@@ -56,6 +57,7 @@ function App() {
               <Route path="student" element={<StudentPortal />} />
               <Route path="scientist" element={<ScientistPortal />} />
               <Route path="admin" element={<AdminDashboard />} />
+              <Route path="profile" element={<Profile />} />
             </Route>
 
             {/* Legacy routes - redirect to new structure */}

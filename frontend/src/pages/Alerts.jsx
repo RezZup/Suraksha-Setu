@@ -20,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from '@/hooks/use-toast';
+import { cachedFetchJson } from '@/utils/requestCache';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
@@ -87,16 +88,6 @@ const AlertCard = ({ alert }) => {
           </Button>
         </div>
       </div>
-      
-      {/* AI Insight Section */}
-      <div className="mt-4 p-3 bg-background/50 rounded-lg border border-border/50 text-sm">
-        <div className="flex items-center gap-2 mb-1 text-primary font-medium">
-          <span className="text-lg">🤖</span> AI Insight
-        </div>
-        <p className="text-muted-foreground text-xs leading-relaxed">
-          {alert.aiInsight}
-        </p>
-      </div>
     </motion.div>
   );
 };
@@ -130,10 +121,10 @@ const Alerts = () => {
           params.append('report_type', selectedType);
         }
         
-        const response = await fetch(`${API_URL}/api/alerts${params.toString() ? '?' + params.toString() : ''}`);
-        if (!response.ok) throw new Error('Failed to fetch alerts');
-        
-        const data = await response.json();
+        const data = await cachedFetchJson(
+          `${API_URL}/api/alerts${params.toString() ? '?' + params.toString() : ''}`,
+          { ttlMs: 45 * 1000 }
+        );
         
         // Format data for display
         const formattedAlerts = (data.alerts || []).map(alert => ({
@@ -144,8 +135,7 @@ const Alerts = () => {
           message: alert.description || alert.message || '',
           location: alert.location || 'Unknown Location',
           time: alert.timestamp ? new Date(alert.timestamp).toLocaleString() : 'Recently',
-          impact: alert.affected_population ? `Affecting ${alert.affected_population} people` : 'To be determined',
-          aiInsight: alert.recommended_action || 'Stay alert and follow official safety guidelines.'
+          impact: alert.affected_population ? `Affecting ${alert.affected_population} people` : 'To be determined'
         }));
         
         setAlerts(formattedAlerts);
@@ -382,21 +372,21 @@ const Alerts = () => {
             <CardHeader>
               <CardTitle className="text-lg flex items-center gap-2">
                 <CheckCircle2 className="w-5 h-5 text-primary" />
-                Safety Tips
+                Feed Status
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="flex gap-3 items-start text-sm">
-                <span className="bg-background p-1 rounded text-xs font-bold border">1</span>
-                <p className="text-muted-foreground">Keep emergency kit ready with dry food & water.</p>
+              <div className="flex justify-between items-center text-sm bg-background/70 rounded-md p-2 border">
+                <span className="text-muted-foreground">Total Alerts</span>
+                <span className="font-semibold">{alerts.length}</span>
               </div>
-              <div className="flex gap-3 items-start text-sm">
-                <span className="bg-background p-1 rounded text-xs font-bold border">2</span>
-                <p className="text-muted-foreground">Charge all communication devices immediately.</p>
+              <div className="flex justify-between items-center text-sm bg-background/70 rounded-md p-2 border">
+                <span className="text-muted-foreground">Filtered Alerts</span>
+                <span className="font-semibold">{filteredAlerts.length}</span>
               </div>
-              <div className="flex gap-3 items-start text-sm">
-                <span className="bg-background p-1 rounded text-xs font-bold border">3</span>
-                <p className="text-muted-foreground">Identify nearest shelter location on map.</p>
+              <div className="flex justify-between items-center text-sm bg-background/70 rounded-md p-2 border">
+                <span className="text-muted-foreground">Auto Refresh</span>
+                <span className="font-semibold">2 min</span>
               </div>
             </CardContent>
           </Card>

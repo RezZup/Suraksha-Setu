@@ -11,7 +11,6 @@ import {
   Shield, 
   Navigation,
   Waves,
-  Loader,
   MapPinOff,
   RefreshCw,
   Clock,
@@ -25,6 +24,8 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from '@/hooks/use-toast';
+import { cachedFetchJson } from '@/utils/requestCache';
+import DataSectionLoader from '@/components/ui/DataSectionLoader';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
@@ -84,9 +85,7 @@ const NearbyDisastersView = () => {
   }, []);
 
   const fetchDisastersForCoords = useCallback(async (latitude, longitude) => {
-    const response = await fetch(`${API_URL}/api/disasters`);
-    if (!response.ok) throw new Error('Failed to fetch disasters');
-    const data = await response.json();
+    const data = await cachedFetchJson(`${API_URL}/api/disasters`, { ttlMs: 60 * 1000 });
     const disasters = data.disasters || [];
     return disasters
       .map(disaster => {
@@ -163,19 +162,16 @@ const NearbyDisastersView = () => {
   const loadDefaultLocation = async () => {
     try {
       setUserLocation({ lat: 28.7041, lon: 77.1025, city: 'Delhi' }); // Delhi default
-      const response = await fetch(`${API_URL}/api/disasters`);
-      if (response.ok) {
-        const data = await response.json();
-        const disasters = (data.disasters || [])
-          .map(disaster => {
-            const coords = getDisasterCoords(disaster);
-            const distance = calculateDistance(28.7041, 77.1025, coords.lat, coords.lon);
-            return { ...disaster, distance };
-          })
-          .sort((a, b) => a.distance - b.distance)
-          .slice(0, 10);
-        setNearbyDisasters(disasters);
-      }
+      const data = await cachedFetchJson(`${API_URL}/api/disasters`, { ttlMs: 60 * 1000 });
+      const disasters = (data.disasters || [])
+        .map(disaster => {
+          const coords = getDisasterCoords(disaster);
+          const distance = calculateDistance(28.7041, 77.1025, coords.lat, coords.lon);
+          return { ...disaster, distance };
+        })
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, 10);
+      setNearbyDisasters(disasters);
     } catch (err) {
       console.error('Error loading default location:', err);
     }
@@ -183,10 +179,11 @@ const NearbyDisastersView = () => {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <Loader className="w-6 h-6 animate-spin text-primary mr-2" />
-        <p>Fetching your location and nearby disasters...</p>
-      </div>
+      <DataSectionLoader
+        variant="nearby"
+        title="Finding nearby hazards"
+        subtitle="Fetching your location and matching active events"
+      />
     );
   }
 
@@ -305,18 +302,18 @@ const CycloneView = () => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`${API_URL}/api/disasters?disaster_type=cyclone`)
-      .then(r => r.json())
+    cachedFetchJson(`${API_URL}/api/disasters?disaster_type=cyclone`, { ttlMs: 60 * 1000 })
       .then(data => { setCyclones(data.disasters || []); })
       .catch(e => console.error('Cyclone fetch error:', e))
       .finally(() => setLoading(false));
   }, []);
 
   if (loading) return (
-    <div className="flex items-center justify-center py-12">
-      <Loader className="w-6 h-6 animate-spin text-primary mr-2" />
-      <p>Loading cyclone data...</p>
-    </div>
+    <DataSectionLoader
+      variant="timeline"
+      title="Loading cyclone feed"
+      subtitle="Collecting live cyclone tracks and history"
+    />
   );
 
   const active = cyclones.filter(c => c.status === 'active');
@@ -434,13 +431,11 @@ const FloodView = () => {
     const fetchData = async () => {
       try {
         const [floodRes, weatherRes] = await Promise.all([
-          fetch(`${API_URL}/api/disasters?disaster_type=flood`),
-          fetch('https://api.open-meteo.com/v1/forecast?latitude=20.59&longitude=78.96&daily=precipitation_sum,rain_sum,precipitation_hours&timezone=Asia%2FKolkata&forecast_days=7'),
+          cachedFetchJson(`${API_URL}/api/disasters?disaster_type=flood`, { ttlMs: 60 * 1000 }),
+          cachedFetchJson('https://api.open-meteo.com/v1/forecast?latitude=20.59&longitude=78.96&daily=precipitation_sum,rain_sum,precipitation_hours&timezone=Asia%2FKolkata&forecast_days=7', { ttlMs: 10 * 60 * 1000 }),
         ]);
-        const floodData = await floodRes.json();
-        setFloods(floodData.disasters || []);
-        const weatherData = await weatherRes.json();
-        setRainfall(weatherData.daily || null);
+        setFloods(floodRes.disasters || []);
+        setRainfall(weatherRes.daily || null);
       } catch (e) {
         console.error('Flood data fetch error:', e);
       } finally {
@@ -451,10 +446,11 @@ const FloodView = () => {
   }, []);
 
   if (loading) return (
-    <div className="flex items-center justify-center py-12">
-      <Loader className="w-6 h-6 animate-spin text-primary mr-2" />
-      <p>Loading flood data...</p>
-    </div>
+    <DataSectionLoader
+      variant="flood"
+      title="Loading flood intelligence"
+      subtitle="Syncing rainfall forecasts and flood alerts"
+    />
   );
 
   const active = floods.filter(f => f.status === 'active');
@@ -502,7 +498,7 @@ const FloodView = () => {
                 const pct = Math.min(100, (mm / maxRain) * 100);
                 const barColor = mm > 30 ? 'bg-blue-600' : mm > 10 ? 'bg-blue-400' : mm > 2 ? 'bg-sky-300' : 'bg-gray-200';
                 return (
-                  <div key={date} className="flex items-center gap-3">
+                  <div key={`${date || 'rain'}-${i}`} className="flex items-center gap-3">
                     <span className="text-xs text-muted-foreground w-24 shrink-0">{date}</span>
                     <div className="flex-1 bg-muted rounded-full h-3 overflow-hidden">
                       <div
@@ -604,8 +600,7 @@ const EarthquakeView = () => {
   const [latest, setLatest] = useState(null);
 
   useEffect(() => {
-    fetch(`${API_URL}/api/disasters?disaster_type=earthquake`)
-      .then(r => r.json())
+    cachedFetchJson(`${API_URL}/api/disasters?disaster_type=earthquake`, { ttlMs: 60 * 1000 })
       .then(data => {
         const list = (data.disasters || []).filter(d => d.source === 'USGS' || d.type === 'earthquake');
         setQuakes(list);
@@ -615,7 +610,13 @@ const EarthquakeView = () => {
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading) return <div className="flex justify-center py-8"><Loader className="animate-spin w-6 h-6" /></div>;
+  if (loading) return (
+    <DataSectionLoader
+      variant="quake"
+      title="Loading earthquake events"
+      subtitle="Fetching latest USGS and regional seismic updates"
+    />
+  );
 
   return (
   <div className="space-y-6">
@@ -700,10 +701,10 @@ const HeatView = () => {
       try {
         const cityResults = await Promise.all(
           HEAT_CITIES.map(city =>
-            fetch(
-              `https://api.open-meteo.com/v1/forecast?latitude=${city.lat}&longitude=${city.lon}&current=temperature_2m,apparent_temperature,uv_index&timezone=Asia%2FKolkata`
+            cachedFetchJson(
+              `https://api.open-meteo.com/v1/forecast?latitude=${city.lat}&longitude=${city.lon}&current=temperature_2m,apparent_temperature,uv_index&timezone=Asia%2FKolkata`,
+              { ttlMs: 10 * 60 * 1000 }
             )
-              .then(r => r.json())
               .then(d => ({
                 name: city.name,
                 temp: d.current?.temperature_2m ?? null,
@@ -716,10 +717,10 @@ const HeatView = () => {
         setCityData(cityResults);
 
         // 7-day forecast for Delhi
-        const fRes = await fetch(
-          'https://api.open-meteo.com/v1/forecast?latitude=28.61&longitude=77.20&daily=temperature_2m_max,temperature_2m_min,uv_index_max&timezone=Asia%2FKolkata&forecast_days=7'
+        const fData = await cachedFetchJson(
+          'https://api.open-meteo.com/v1/forecast?latitude=28.61&longitude=77.20&daily=temperature_2m_max,temperature_2m_min,uv_index_max&timezone=Asia%2FKolkata&forecast_days=7',
+          { ttlMs: 10 * 60 * 1000 }
         );
-        const fData = await fRes.json();
         setForecast(fData.daily || null);
       } catch (e) {
         console.error('Heat data fetch error:', e);
@@ -731,10 +732,11 @@ const HeatView = () => {
   }, []);
 
   if (loading) return (
-    <div className="flex items-center justify-center py-12">
-      <Loader className="w-6 h-6 animate-spin text-primary mr-2" />
-      <p>Loading heat data...</p>
-    </div>
+    <DataSectionLoader
+      variant="heatwave"
+      title="Loading heatwave monitor"
+      subtitle="Analyzing temperature and UV patterns"
+    />
   );
 
   const withData = cityData.filter(c => c.temp != null);
@@ -841,7 +843,7 @@ const HeatView = () => {
                 const pct = Math.min(100, (max / 50) * 100);
                 const barColor = max >= 44 ? 'bg-red-600' : max >= 40 ? 'bg-orange-500' : max >= 35 ? 'bg-yellow-500' : 'bg-green-400';
                 return (
-                  <div key={date} className="flex items-center gap-3">
+                  <div key={`${date || 'temp'}-${i}`} className="flex items-center gap-3">
                     <span className="text-xs text-muted-foreground w-24 shrink-0">{date}</span>
                     <div className="flex-1 bg-muted rounded-full h-3 overflow-hidden">
                       <div
@@ -882,8 +884,7 @@ const TimelineView = () => {
   const scrollRef = useRef(null);
 
   useEffect(() => {
-    fetch(`${API_URL}/api/disasters`)
-      .then(r => r.json())
+    cachedFetchJson(`${API_URL}/api/disasters`, { ttlMs: 60 * 1000 })
       .then(data => {
         const list = (data.disasters || [])
           .filter(d => d.date)
@@ -910,10 +911,11 @@ const TimelineView = () => {
   const months = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
 
   if (loading) return (
-    <div className="flex items-center justify-center py-16">
-      <Loader className="w-6 h-6 animate-spin text-primary mr-2" />
-      <p>Loading timeline...</p>
-    </div>
+    <DataSectionLoader
+      variant="timeline"
+      title="Building disaster timeline"
+      subtitle="Ordering events across recent months"
+    />
   );
 
   return (

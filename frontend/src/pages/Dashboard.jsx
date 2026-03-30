@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import EnhancedAIChatInterface from '@/components/dashboard/EnhancedAIChatInterface';
 import SurakshaScore from '@/components/dashboard/SurakshaScore';
 import ActiveAlerts from '@/components/dashboard/ActiveAlerts';
@@ -7,55 +7,23 @@ import ImpactStats from '@/components/dashboard/ImpactStats';
 import LiveAQIChart from '@/components/dashboard/LiveAQIChart';
 import LocationSelector from '@/components/location/LocationSelector';
 import NotificationSettings from '@/components/notifications/NotificationSettings';
-import { SectionErrorBoundary } from '@/components/errors/ErrorBoundary';
-import { SkeletonCard, SkeletonDashboard } from '@/components/ui/skeleton-loaders';
 import { Button } from "@/components/ui/button";
-import { Download, Share2, RefreshCw, TrendingUp } from 'lucide-react';
+import { Download, Share2, RefreshCw, TrendingUp, ShieldCheck, BellRing, Clock3 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 
-const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api';
-
 const Dashboard = () => {
   const { t } = useTranslation();
-  const [recommendations, setRecommendations] = useState([]);
   const [score, setScore] = useState(82);
   const [isRefreshing, setIsRefreshing] = useState(false);
-
-  useEffect(() => {
-    loadRecommendations();
-  }, []);
-
-  const loadRecommendations = () => {
-    // Static safety recommendations — no weather API dependency
-    setRecommendations([
-      {
-        icon: '🛡️',
-        color: 'bg-indigo-500/20 text-indigo-600',
-        text: 'Keep your emergency kit stocked with water, first-aid, and a flashlight.'
-      },
-      {
-        icon: '📱',
-        color: 'bg-purple-500/20 text-purple-600',
-        text: 'Enable push notifications for real-time disaster alerts in your area.'
-      },
-      {
-        icon: '🗺️',
-        color: 'bg-blue-500/20 text-blue-600',
-        text: 'Know your nearest evacuation route and safe shelter location.'
-      },
-      {
-        icon: '🔋',
-        color: 'bg-green-500/20 text-green-600',
-        text: 'Ensure your phone and power bank are charged for emergencies.'
-      },
-    ]);
-  };
+  const [lastRefreshAt, setLastRefreshAt] = useState(new Date());
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
-    loadRecommendations();
-    setTimeout(() => setIsRefreshing(false), 1000);
+    setTimeout(() => {
+      setLastRefreshAt(new Date());
+      setIsRefreshing(false);
+    }, 900);
   };
 
   return (
@@ -71,9 +39,12 @@ const Dashboard = () => {
           <h1 className="text-4xl font-extrabold tracking-tight bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 bg-clip-text text-transparent">
             {t('dashboard.commandCenter')}
           </h1>
-          <p className="text-muted-foreground flex items-center gap-2 text-sm">
+          <p className="text-muted-foreground flex items-center gap-2 text-sm flex-wrap">
             <TrendingUp className="w-4 h-4" />
             {t('dashboard.commandSubtitle')}
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 text-xs font-medium">
+              <ShieldCheck className="w-3 h-3" /> System Live
+            </span>
           </p>
         </div>
         <div className="flex gap-2">
@@ -156,37 +127,26 @@ const Dashboard = () => {
           {/* Push Notifications */}
           <NotificationSettings />
 
-          {/* AI Recommendations with Enhanced UI */}
-          <div className="bg-gradient-to-br from-purple-50 via-pink-50 to-blue-50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900 border-2 border-purple-200 dark:border-purple-900/30 rounded-2xl p-6 shadow-lg backdrop-blur-sm">
-            <h3 className="font-bold text-lg mb-4 flex items-center gap-2">
-              <div className="w-1 h-6 bg-gradient-to-b from-purple-600 via-pink-600 to-blue-600 rounded-full"></div>
-              <span className="bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">AI Recommendations</span>
+          {/* Operations Panel */}
+          <div className="bg-gradient-to-br from-slate-50 via-indigo-50 to-cyan-50 dark:from-gray-900 dark:via-gray-900 dark:to-gray-800 border-2 border-indigo-100 dark:border-gray-700 rounded-2xl p-6 shadow-lg backdrop-blur-sm">
+            <h3 className="font-bold text-lg mb-4 flex items-center gap-2 text-foreground">
+              <ShieldCheck className="w-5 h-5 text-indigo-600" />
+              Operations Panel
             </h3>
-            {recommendations.length > 0 ? (
-              <ul className="space-y-2.5">
-                {recommendations.map((rec, idx) => (
-                  <motion.li
-                    key={idx}
-                    initial={{ opacity: 0, x: -10 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: 0.6 + idx * 0.05, type: "spring", stiffness: 200 }}
-                    className="flex gap-3 items-start p-3 rounded-xl bg-white/70 dark:bg-gray-800/70 hover:bg-white dark:hover:bg-gray-700 transition-all cursor-pointer group shadow-sm hover:shadow-md border border-gray-100 dark:border-gray-700"
-                  >
-                    <span className={`${rec.color} rounded-xl p-2.5 text-base group-hover:scale-110 transition-transform shadow-sm min-w-[40px] flex items-center justify-center`}>
-                      {rec.icon}
-                    </span>
-                    <span className="text-[13px] flex-1 pt-1.5 leading-relaxed">{rec.text}</span>
-                  </motion.li>
-                ))}
-              </ul>
-            ) : (
-              <div className="text-sm text-muted-foreground animate-pulse flex items-center gap-2 p-4">
-                <div className="w-2 h-2 bg-purple-600 rounded-full animate-bounce"></div>
-                <div className="w-2 h-2 bg-pink-600 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
-                <span className="ml-2">Loading recommendations...</span>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between p-3 rounded-xl bg-white/70 dark:bg-gray-800/80 border border-indigo-100 dark:border-gray-700">
+                <span className="text-sm text-muted-foreground">Readiness Score</span>
+                <span className="font-semibold text-indigo-700 dark:text-indigo-300">{score}/100</span>
               </div>
-            )}
+              <div className="flex items-center justify-between p-3 rounded-xl bg-white/70 dark:bg-gray-800/80 border border-indigo-100 dark:border-gray-700">
+                <span className="text-sm text-muted-foreground inline-flex items-center gap-2"><BellRing className="w-4 h-4" /> Alerts Channel</span>
+                <span className="font-semibold text-emerald-600">Active</span>
+              </div>
+              <div className="flex items-center justify-between p-3 rounded-xl bg-white/70 dark:bg-gray-800/80 border border-indigo-100 dark:border-gray-700">
+                <span className="text-sm text-muted-foreground inline-flex items-center gap-2"><Clock3 className="w-4 h-4" /> Last Refresh</span>
+                <span className="font-semibold text-foreground text-sm">{lastRefreshAt.toLocaleTimeString()}</span>
+              </div>
+            </div>
           </div>
         </motion.div>
       </div>

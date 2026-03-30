@@ -14,12 +14,13 @@ import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
-  apiKey: "AIzaSyAXy6yy5msccxqsw8jQP7t3FuFinNAwvPg",
-  authDomain: "suraksha-setu-1534a.firebaseapp.com",
-  projectId: "suraksha-setu-1534a",
-  storageBucket: "suraksha-setu-1534a.firebasestorage.app",
-  messagingSenderId: "743420774140",
-  appId: "1:743420774140:web:644b244bf9307fdaf2b979"
+  apiKey: "AIzaSyBR0Kbv95na40v8WdznKLiyruGkY70keuc",
+  authDomain: "surakhsa-setu.firebaseapp.com",
+  projectId: "surakhsa-setu",
+  storageBucket: "surakhsa-setu.firebasestorage.app",
+  messagingSenderId: "791422434644",
+  appId: "1:791422434644:web:f1207980bf4ce64b50dcc1",
+  measurementId: "G-MFPZ90JFFH"
 };
 
 // Initialize Firebase

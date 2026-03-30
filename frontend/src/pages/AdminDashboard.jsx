@@ -35,6 +35,7 @@ import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import UserManagement from "@/components/admin/UserManagement";
 import { useTranslation } from 'react-i18next';
+import { cachedFetchJson } from '@/utils/requestCache';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
@@ -51,6 +52,8 @@ const AdminDashboard = () => {
   const [retractingId, setRetractingId] = useState(null);
   const [actionFeedback, setActionFeedback] = useState('');
   const [stats, setStats] = useState(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
   const [systemLogs, setSystemLogs] = useState([]);
   const [reports, setReports] = useState([]);
   const [reportFilter, setReportFilter] = useState('pending');
@@ -80,17 +83,18 @@ const AdminDashboard = () => {
   };
 
   const fetchData = useCallback(async () => {
+    setIsRefreshing(true);
     try {
       const [alertsRes, pendingRes, safetyRes, smsRes, incidentRes, smsLogRes, statsRes, logsRes, tgRes] = await Promise.allSettled([
-        fetch(`${API_URL}/admin/alerts`).then(r => r.json()),
-        fetch(`${API_URL}/admin/alerts/pending`).then(r => r.json()),
-        fetch(`${API_URL}/admin/safety/status`).then(r => r.json()),
-        fetch(`${API_URL}/api/sms/status`).then(r => r.json()),
-        fetch(`${API_URL}/admin/incidents?limit=20`).then(r => r.json()),
-        fetch(`${API_URL}/api/sms/audit-log?limit=20`).then(r => r.json()),
-        fetch(`${API_URL}/admin/stats`).then(r => r.json()),
-        fetch(`${API_URL}/admin/logs?limit=10`).then(r => r.json()),
-        fetch(`${API_URL}/admin/telegram/stats`).then(r => r.json()),
+        cachedFetchJson(`${API_URL}/admin/alerts`, { ttlMs: 30 * 1000 }),
+        cachedFetchJson(`${API_URL}/admin/alerts/pending`, { ttlMs: 30 * 1000 }),
+        cachedFetchJson(`${API_URL}/admin/safety/status`, { ttlMs: 30 * 1000 }),
+        cachedFetchJson(`${API_URL}/api/sms/status`, { ttlMs: 30 * 1000 }),
+        cachedFetchJson(`${API_URL}/admin/incidents?limit=20`, { ttlMs: 30 * 1000 }),
+        cachedFetchJson(`${API_URL}/api/sms/audit-log?limit=20`, { ttlMs: 30 * 1000 }),
+        cachedFetchJson(`${API_URL}/admin/stats`, { ttlMs: 30 * 1000 }),
+        cachedFetchJson(`${API_URL}/admin/logs?limit=10`, { ttlMs: 30 * 1000 }),
+        cachedFetchJson(`${API_URL}/admin/telegram/stats`, { ttlMs: 30 * 1000 }),
       ]);
       if (alertsRes.status === 'fulfilled') setAlerts(alertsRes.value?.alerts || alertsRes.value || []);
       if (pendingRes.status === 'fulfilled') setPendingAlerts(pendingRes.value?.pending_alerts || []);
@@ -101,15 +105,17 @@ const AdminDashboard = () => {
       if (statsRes.status === 'fulfilled') setStats(statsRes.value);
       if (logsRes.status === 'fulfilled') setSystemLogs(logsRes.value?.logs || []);
       if (tgRes.status === 'fulfilled') setTelegramStats(tgRes.value);
+      setLastUpdated(new Date());
     } catch (err) {
       console.error('Admin fetch error:', err);
+    } finally {
+      setIsRefreshing(false);
     }
   }, []);
 
   const fetchReports = useCallback(async (status = reportFilter) => {
     try {
-      const res = await fetch(`${API_URL}/admin/reports?status=${status}&limit=50`);
-      const data = await res.json();
+      const data = await cachedFetchJson(`${API_URL}/admin/reports?status=${status}&limit=50`, { ttlMs: 20 * 1000 });
       setReports(data?.reports || []);
     } catch (err) {
       console.error('Reports fetch error:', err);
@@ -287,18 +293,36 @@ const AdminDashboard = () => {
   };
 
   const activeAlerts = Array.isArray(alerts) ? alerts.filter(a => a.is_active && !a.retracted) : [];
+  const handleManualRefresh = () => {
+    fetchData();
+    if (activeTab === 'reports') fetchReports();
+  };
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+    <div className="max-w-7xl mx-auto space-y-6 pb-6">
+      <div className="sticky top-0 z-20 bg-background/90 backdrop-blur-sm border-b -mx-4 px-4 py-4 md:mx-0 md:px-0 md:border-0 md:bg-transparent md:backdrop-blur-none">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">{t('admin.systemAdministration')}</h1>
           <p className="text-muted-foreground">{t('admin.manageSystem')}</p>
         </div>
+          <div className="flex items-center gap-2">
+            <Badge variant={stats?.system_status === 'operational' ? 'default' : 'secondary'} className="h-8 px-3">
+              {stats?.system_status === 'operational' ? 'System Healthy' : 'Status Unknown'}
+            </Badge>
+            <Button variant="outline" onClick={handleManualRefresh} disabled={isRefreshing} className="gap-2 h-8">
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              {isRefreshing ? 'Refreshing' : 'Refresh'}
+            </Button>
+          </div>
+        </div>
+        {lastUpdated && (
+          <p className="text-xs text-muted-foreground mt-2">Last updated: {lastUpdated.toLocaleTimeString()}</p>
+        )}
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-        <TabsList className="grid w-full max-w-4xl grid-cols-6">
+        <TabsList className="w-full max-w-full h-auto p-1.5 flex flex-wrap md:flex-nowrap gap-1 overflow-x-auto justify-start">
           <TabsTrigger value="overview" className="gap-2">
             <Server className="w-4 h-4" />
             {t('admin.overview')}
@@ -333,7 +357,7 @@ const AdminDashboard = () => {
         <TabsContent value="overview" className="space-y-6">
           {/* System Health Stats */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <Card>
+        <Card className="hover:shadow-sm transition-shadow">
           <CardContent className="p-6 flex items-center gap-4">
             <div className="p-3 rounded-full bg-green-100 text-green-600">
               <Server className="w-6 h-6" />
@@ -344,7 +368,7 @@ const AdminDashboard = () => {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="hover:shadow-sm transition-shadow">
           <CardContent className="p-6 flex items-center gap-4">
             <div className="p-3 rounded-full bg-blue-100 text-blue-600">
               <Users className="w-6 h-6" />
@@ -355,7 +379,7 @@ const AdminDashboard = () => {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="hover:shadow-sm transition-shadow">
           <CardContent className="p-6 flex items-center gap-4">
             <div className="p-3 rounded-full bg-orange-100 text-orange-600">
               <AlertTriangle className="w-6 h-6" />
@@ -366,7 +390,7 @@ const AdminDashboard = () => {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="hover:shadow-sm transition-shadow">
           <CardContent className="p-6 flex items-center gap-4">
             <div className="p-3 rounded-full bg-purple-100 text-purple-600">
               <ShieldCheck className="w-6 h-6" />
@@ -381,7 +405,7 @@ const AdminDashboard = () => {
 
       {/* Extra stats row */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <Card>
+        <Card className="hover:shadow-sm transition-shadow">
           <CardContent className="p-6 flex items-center gap-4">
             <div className="p-3 rounded-full bg-indigo-100 text-indigo-600">
               <MessageSquare className="w-6 h-6" />
@@ -392,7 +416,7 @@ const AdminDashboard = () => {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="hover:shadow-sm transition-shadow">
           <CardContent className="p-6 flex items-center gap-4">
             <div className="p-3 rounded-full bg-teal-100 text-teal-600">
               <Phone className="w-6 h-6" />
@@ -403,7 +427,7 @@ const AdminDashboard = () => {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="hover:shadow-sm transition-shadow">
           <CardContent className="p-6 flex items-center gap-4">
             <div className="p-3 rounded-full bg-rose-100 text-rose-600">
               <AlertTriangle className="w-6 h-6" />
@@ -414,7 +438,7 @@ const AdminDashboard = () => {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="hover:shadow-sm transition-shadow">
           <CardContent className="p-6 flex items-center gap-4">
             <div className="p-3 rounded-full bg-amber-100 text-amber-600">
               <Settings className="w-6 h-6" />
@@ -918,7 +942,7 @@ const AdminDashboard = () => {
               <Input placeholder="Target Pincode (optional — e.g. 400001)" value={alertForm.pincode} onChange={(e) => setAlertForm((p) => ({ ...p, pincode: e.target.value.replace(/\D/g, '').slice(0, 6) }))} maxLength={6} />
               <Button onClick={handleCreateAlert} disabled={!alertForm.title || !alertForm.description}>Create Alert</Button>
 
-              <div className="rounded-md border">
+              <div className="rounded-md border overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -930,6 +954,13 @@ const AdminDashboard = () => {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
+                    {alerts.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                          No alerts available yet.
+                        </TableCell>
+                      </TableRow>
+                    )}
                     {alerts.slice(0, 10).map((alert) => (
                       <TableRow key={alert.id}>
                         <TableCell className="font-medium max-w-[240px] truncate">{alert.title}</TableCell>

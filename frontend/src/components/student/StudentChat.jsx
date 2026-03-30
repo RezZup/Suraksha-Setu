@@ -181,6 +181,7 @@ export default function StudentChat() {
                     <h3>Gyan Setu — Ask about disasters</h3>
                     <p>Powered by NDMA guidelines</p>
                 </div>
+                <div className="student-chat__header-badge">Learn Mode</div>
             </div>
 
             {/* Messages */}
@@ -205,6 +206,10 @@ export default function StudentChat() {
                                 <div className="student-chat__token-cost">
                                     ~{msg.tokenCost} tokens {msg.cached ? '(cached)' : ''}
                                 </div>
+                            )}
+
+                            {msg.role === 'bot' && msg.cached && (
+                                <div className="student-chat__cache-hint">Fast reply from cache</div>
                             )}
                         </div>
                     </div>

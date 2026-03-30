@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from database import get_db, CommunityPost, Comment, DirectMessage, Notification, UserReport
 from firebase_auth import verify_firebase_token, get_optional_user
+from sms_service import sms_service, phone_registry
 
 logger = logging.getLogger(__name__)
 
@@ -297,12 +298,37 @@ async def create_post(request: CreatePostRequest, db: AsyncSession = Depends(get
                 "url": "/app/community",
             }
             # WS: nearby users via WebSocket
-            await ws_manager.broadcast_location_based(alert_payload, radius_km=15)
+            await ws_manager.broadcast_location_based(alert_payload, radius_km=10)
             # Push: nearby users via Web Push (background, don't block response)
             import asyncio
             asyncio.ensure_future(
-                push_manager.send_nearby_push(request.lat, request.lon, alert_payload, radius_km=15, db=db)
+                push_manager.send_nearby_push(request.lat, request.lon, alert_payload, radius_km=10, db=db)
             )
+
+            # WhatsApp: send to users within 10 km for community help/emergency/alert posts
+            nearby_users = await phone_registry.get_user_phones_near_from_db(
+                db_session=db,
+                lat=request.lat,
+                lon=request.lon,
+                radius_km=10,
+            )
+            if nearby_users:
+                wa_result = await sms_service.send_community_whatsapp(
+                    recipients=nearby_users,
+                    post_type=request.type,
+                    author=request.author or "Community Member",
+                    location=request.location or "your area",
+                    content=request.content,
+                    app_url="http://localhost:3000/app/community",
+                )
+                logger.info(
+                    "Community WhatsApp: sent=%s total=%s for post=%s",
+                    wa_result.get("sent"),
+                    wa_result.get("total"),
+                    post_id,
+                )
+            else:
+                logger.info("Community WhatsApp: no nearby users with phone/location in 10km")
         except Exception as e:
             logger.warning("Proximity notification failed: %s", e)
 

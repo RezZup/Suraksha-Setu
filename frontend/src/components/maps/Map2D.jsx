@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Circle, Polyline, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Circle, Polyline, Tooltip, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -172,6 +172,31 @@ const createAlertIcon = (severity) => {
     ">!</div>`,
     iconSize: [28, 28],
     iconAnchor: [14, 14],
+  });
+};
+
+const createDisasterIcon = (severity = 'low', type = 'disaster') => {
+  const color = severity === 'extreme' || severity === 'high' ? '#DC2626'
+    : severity === 'moderate' ? '#EA580C'
+    : '#2563EB';
+  const emoji = type === 'earthquake' ? '🌍' : type === 'flood' ? '🌊' : type === 'cyclone' ? '🌀' : '⚠️';
+
+  return L.divIcon({
+    className: 'custom-disaster-marker',
+    html: `<div style="
+      background-color: ${color};
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      border: 2px solid white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+    ">${emoji}</div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
   });
 };
 
@@ -369,12 +394,51 @@ const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, se
         if (!lat || !lon || isNaN(lat) || isNaN(lon)) return null;
         return (
           <Marker key={`alert-${alert.id || index}`} position={[lat, lon]} icon={createAlertIcon(alert.severity)}>
+            <Tooltip direction="top" offset={[0, -10]} opacity={0.95}>
+              <div className="text-xs">
+                <div><strong>{alert.title || alert.type || 'Alert'}</strong></div>
+                {alert.severity && <div>Severity: {String(alert.severity).toUpperCase()}</div>}
+              </div>
+            </Tooltip>
             <Popup>
               <div className="text-sm">
                 <strong>{alert.title || alert.type || 'Alert'}</strong>
                 <br />
                 {alert.severity && <><span style={{color: alert.severity === 'critical' ? '#EF4444' : '#F59E0B', fontWeight: 'bold'}}>{alert.severity}</span><br/></>}
                 {alert.description || alert.location || ''}
+              </div>
+            </Popup>
+          </Marker>
+        );
+      })}
+
+      {/* Disaster Markers */}
+      {disasters && disasters.length > 0 && disasters.map((d, index) => {
+        const lat = Number(d.lat);
+        const lon = Number(d.lon);
+        if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
+        return (
+          <Marker
+            key={`disaster-${d.id || index}`}
+            position={[lat, lon]}
+            icon={createDisasterIcon(d.severity, d.type)}
+          >
+            <Tooltip direction="top" offset={[0, -10]} opacity={0.95}>
+              <div className="text-xs">
+                <div><strong>{d.title || d.type || 'Disaster'}</strong></div>
+                {d.type && <div>Type: {d.type}</div>}
+                {d.severity && <div>Severity: {d.severity}</div>}
+              </div>
+            </Tooltip>
+            <Popup>
+              <div className="text-sm">
+                <strong>{d.title || d.type || 'Disaster'}</strong>
+                <br />
+                {d.type && <><span><strong>Type:</strong> {d.type}</span><br /></>}
+                {d.severity && <><span><strong>Severity:</strong> {d.severity}</span><br /></>}
+                {d.location && <><span><strong>Location:</strong> {d.location}</span><br /></>}
+                {d.date && <><span><strong>Date:</strong> {d.date}</span><br /></>}
+                {d.description || ''}
               </div>
             </Popup>
           </Marker>

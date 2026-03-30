@@ -16,6 +16,8 @@ import os
 import time
 import logging
 import asyncio
+import uuid
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple
 
 import httpx
@@ -55,8 +57,153 @@ def _get_client() -> httpx.AsyncClient:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  IN-MEMORY TTL CACHE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_cache: Dict[str, Tuple[float, Any]] = {}
+_cache: Dict[str, Tuple[float, float, Any]] = {}
 _MAX_CACHE_ENTRIES = 500
+
+
+def _quality_status(score: float) -> str:
+    if score >= 0.85:
+        return "high"
+    if score >= 0.65:
+        return "medium"
+    return "low"
+
+
+def _weather_quality_score(payload: Dict[str, Any]) -> float:
+    current = payload.get("current", {}) if isinstance(payload, dict) else {}
+    checks = [
+        current.get("temperature") is not None,
+        current.get("humidity") is not None,
+        current.get("wind_speed") is not None,
+        current.get("pressure") is not None,
+        payload.get("daily") is not None and len(payload.get("daily", [])) >= 3,
+        payload.get("hourly") is not None and len(payload.get("hourly", [])) >= 6,
+    ]
+    return round(sum(1 for c in checks if c) / len(checks), 3)
+
+
+def _aqi_quality_score(payload: Optional[Dict[str, Any]]) -> float:
+    if not payload:
+        return 0.0
+    checks = [
+        payload.get("aqi") is not None,
+        payload.get("aqi_index") is not None,
+        payload.get("aqi_label") is not None,
+        payload.get("pm25") is not None,
+        payload.get("pm10") is not None,
+    ]
+    return round(sum(1 for c in checks if c) / len(checks), 3)
+
+
+async def _log_source_ingestion(
+    source: str,
+    dataset_type: str,
+    payload: Optional[Dict[str, Any]],
+    quality_score: float,
+    is_usable: bool,
+    retry_count: int,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    city: Optional[str] = None,
+    reason: Optional[str] = None,
+):
+    try:
+        from database import AsyncSessionLocal, SourceIngestionLog
+
+        status = "success" if is_usable else ("low_quality" if quality_score > 0 else "failed")
+        async with AsyncSessionLocal() as db:
+            db.add(SourceIngestionLog(
+                id=str(uuid.uuid4()),
+                source=source,
+                dataset_type=dataset_type,
+                status=status,
+                quality_score=quality_score,
+                is_usable=is_usable,
+                retry_count=retry_count,
+                reason=reason,
+                lat=lat,
+                lon=lon,
+                city=city,
+                payload=payload,
+            ))
+            await db.commit()
+    except Exception as e:
+        logger.warning("Source ingestion log failed: %s", e)
+
+
+async def _persist_weather_dataset(
+    source: str,
+    lat: float,
+    lon: float,
+    city: Optional[str],
+    weather_payload: Dict[str, Any],
+    quality_score: float,
+):
+    try:
+        from database import AsyncSessionLocal, WeatherDataset
+
+        current = weather_payload.get("current", {})
+        obs_time = datetime.now(timezone.utc)
+        async with AsyncSessionLocal() as db:
+            db.add(WeatherDataset(
+                id=str(uuid.uuid4()),
+                source=source,
+                city=city,
+                lat=lat,
+                lon=lon,
+                observation_time=obs_time,
+                temperature=current.get("temperature"),
+                humidity=current.get("humidity"),
+                wind_speed=current.get("wind_speed"),
+                pressure=current.get("pressure"),
+                rain=current.get("rain"),
+                condition=current.get("condition"),
+                weather_code=current.get("weather_code"),
+                quality_score=quality_score,
+                quality_status=_quality_status(quality_score),
+                raw_payload=weather_payload,
+            ))
+            await db.commit()
+    except Exception as e:
+        logger.warning("Weather dataset persistence failed: %s", e)
+
+
+async def _persist_aqi_dataset(
+    source: str,
+    lat: float,
+    lon: float,
+    city: Optional[str],
+    aqi_payload: Dict[str, Any],
+    quality_score: float,
+):
+    try:
+        from database import AsyncSessionLocal, AQIDataset
+
+        obs_time = datetime.now(timezone.utc)
+        async with AsyncSessionLocal() as db:
+            db.add(AQIDataset(
+                id=str(uuid.uuid4()),
+                source=source,
+                city=city,
+                lat=lat,
+                lon=lon,
+                observation_time=obs_time,
+                aqi=aqi_payload.get("aqi"),
+                aqi_index=aqi_payload.get("aqi_index"),
+                aqi_label=aqi_payload.get("aqi_label"),
+                pm25=aqi_payload.get("pm25"),
+                pm10=aqi_payload.get("pm10"),
+                no2=aqi_payload.get("no2"),
+                o3=aqi_payload.get("o3"),
+                so2=aqi_payload.get("so2"),
+                co=aqi_payload.get("co"),
+                quality_score=quality_score,
+                quality_status=_quality_status(quality_score),
+                raw_payload=aqi_payload,
+            ))
+            await db.commit()
+    except Exception as e:
+        logger.warning("AQI dataset persistence failed: %s", e)
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -179,7 +326,7 @@ async def _ip_geolocate(ip: str) -> Optional[Dict]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  OPEN-METEO WEATHER (current + hourly + daily)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-async def _fetch_weather(lat: float, lon: float) -> Dict:
+async def _fetch_weather(lat: float, lon: float, city: Optional[str] = None) -> Dict:
     """Fetch current + 24h hourly + 7-day daily forecast from Open-Meteo."""
     cache_key = f"wx:{round(lat, 2)}:{round(lon, 2)}"
     cached = _cache_get(cache_key)
@@ -187,25 +334,33 @@ async def _fetch_weather(lat: float, lon: float) -> Dict:
         return cached
 
     client = _get_client()
-    resp = await client.get(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": lat,
-            "longitude": lon,
-            "current": "temperature_2m,relative_humidity_2m,apparent_temperature,"
-                       "is_day,precipitation,rain,weather_code,wind_speed_10m,"
-                       "wind_direction_10m,surface_pressure",
-            "hourly": "temperature_2m,precipitation_probability,precipitation,"
-                      "relative_humidity_2m,weather_code",
-            "daily": "weather_code,temperature_2m_max,temperature_2m_min,"
-                     "sunrise,sunset,uv_index_max,precipitation_sum,wind_speed_10m_max",
-            "timezone": "auto",
-            "forecast_days": 7,
-            "forecast_hours": 24,
-        },
-    )
-    resp.raise_for_status()
-    raw = resp.json()
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "current": "temperature_2m,relative_humidity_2m,apparent_temperature,"
+                   "is_day,precipitation,rain,weather_code,wind_speed_10m,"
+                   "wind_direction_10m,surface_pressure",
+        "hourly": "temperature_2m,precipitation_probability,precipitation,"
+                  "relative_humidity_2m,weather_code",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,"
+                 "sunrise,sunset,uv_index_max,precipitation_sum,wind_speed_10m_max",
+        "timezone": "auto",
+        "forecast_days": 7,
+        "forecast_hours": 24,
+    }
+
+    raw = None
+    retry_count = 0
+    for attempt in range(2):
+        retry_count = attempt
+        resp = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
+        resp.raise_for_status()
+        raw = resp.json()
+        if raw and raw.get("current"):
+            break
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=502, detail="Weather source returned invalid payload")
+
     c = raw.get("current", {})
 
     weather_code = c.get("weather_code", 0)
@@ -259,6 +414,57 @@ async def _fetch_weather(lat: float, lon: float) -> Dict:
             "wind_max": _safe_idx(d.get("wind_speed_10m_max"), i),
         })
 
+    quality_score = _weather_quality_score(result)
+    if quality_score < 0.65:
+        # One additional fetch if quality is poor.
+        try:
+            retry_count = 1
+            resp_retry = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
+            resp_retry.raise_for_status()
+            retry_raw = resp_retry.json()
+            if retry_raw and retry_raw.get("current"):
+                raw = retry_raw
+                c = raw.get("current", {})
+                weather_code = c.get("weather_code", 0)
+                result["current"] = {
+                    "temperature": c.get("temperature_2m"),
+                    "humidity": c.get("relative_humidity_2m"),
+                    "apparent_temperature": c.get("apparent_temperature"),
+                    "feels_like": c.get("apparent_temperature"),
+                    "wind_speed": c.get("wind_speed_10m"),
+                    "wind_direction": c.get("wind_direction_10m"),
+                    "pressure": c.get("surface_pressure"),
+                    "condition": _wmo_to_condition(weather_code),
+                    "weather_code": weather_code,
+                    "rain": c.get("rain", c.get("precipitation", 0)),
+                    "is_day": c.get("is_day", 1),
+                    "is_severe": _wmo_is_severe(weather_code),
+                }
+                quality_score = _weather_quality_score(result)
+        except Exception as e:
+            logger.warning("Weather quality re-fetch failed: %s", e)
+
+    await _persist_weather_dataset(
+        source="open-meteo",
+        lat=lat,
+        lon=lon,
+        city=city,
+        weather_payload=result,
+        quality_score=quality_score,
+    )
+    await _log_source_ingestion(
+        source="open-meteo",
+        dataset_type="weather",
+        payload=raw if isinstance(raw, dict) else result,
+        quality_score=quality_score,
+        is_usable=quality_score >= 0.65,
+        retry_count=retry_count,
+        lat=lat,
+        lon=lon,
+        city=city,
+        reason=None if quality_score >= 0.65 else "missing required weather fields",
+    )
+
     _cache_set(cache_key, result, WEATHER_CACHE_TTL)
     return result
 
@@ -276,10 +482,25 @@ AQI_MAP = {1: 25, 2: 60, 3: 110, 4: 170, 5: 300}
 AQI_LABELS = {1: "Good", 2: "Fair", 3: "Moderate", 4: "Poor", 5: "Very Poor"}
 
 
-async def _fetch_aqi(lat: float, lon: float) -> Optional[Dict]:
+async def _fetch_aqi(lat: float, lon: float, city: Optional[str] = None) -> Optional[Dict]:
     """Fetch current AQI from OpenWeatherMap Air Pollution API."""
     if not OWM_API_KEY or OWM_API_KEY.startswith("mock"):
-        return _mock_aqi(lat, lon)
+        mock = _mock_aqi(lat, lon)
+        score = _aqi_quality_score(mock)
+        await _persist_aqi_dataset("openweather-mock", lat, lon, city, mock, score)
+        await _log_source_ingestion(
+            source="openweather-mock",
+            dataset_type="aqi",
+            payload=mock,
+            quality_score=score,
+            is_usable=False,
+            retry_count=0,
+            lat=lat,
+            lon=lon,
+            city=city,
+            reason="mock data fallback due to missing OPENWEATHER_API_KEY",
+        )
+        return mock
 
     cache_key = f"aqi:{round(lat, 2)}:{round(lon, 2)}"
     cached = _cache_get(cache_key)
@@ -313,11 +534,67 @@ async def _fetch_aqi(lat: float, lon: float) -> Optional[Dict]:
             "so2": comp.get("so2"),
             "co": comp.get("co"),
         }
+        score = _aqi_quality_score(result)
+        if score < 0.65:
+            # One re-fetch attempt for poor-quality payloads.
+            resp_retry = await client.get(
+                "http://api.openweathermap.org/data/2.5/air_pollution",
+                params={"lat": lat, "lon": lon, "appid": OWM_API_KEY},
+            )
+            resp_retry.raise_for_status()
+            data_retry = resp_retry.json()
+            items_retry = data_retry.get("list", [])
+            if items_retry:
+                item_r = items_retry[0]
+                aqi_idx_r = item_r.get("main", {}).get("aqi", 2)
+                comp_r = item_r.get("components", {})
+                result = {
+                    "aqi": AQI_MAP.get(aqi_idx_r, 100),
+                    "aqi_label": AQI_LABELS.get(aqi_idx_r, "Moderate"),
+                    "aqi_index": aqi_idx_r,
+                    "pm25": comp_r.get("pm2_5"),
+                    "pm10": comp_r.get("pm10"),
+                    "no2": comp_r.get("no2"),
+                    "o3": comp_r.get("o3"),
+                    "so2": comp_r.get("so2"),
+                    "co": comp_r.get("co"),
+                }
+                score = _aqi_quality_score(result)
+
+        await _persist_aqi_dataset("openweather", lat, lon, city, result, score)
+        await _log_source_ingestion(
+            source="openweather",
+            dataset_type="aqi",
+            payload=result,
+            quality_score=score,
+            is_usable=score >= 0.65,
+            retry_count=1 if score < 0.65 else 0,
+            lat=lat,
+            lon=lon,
+            city=city,
+            reason=None if score >= 0.65 else "missing required aqi fields",
+        )
+
         _cache_set(cache_key, result, AQI_CACHE_TTL)
         return result
     except Exception as e:
         logger.error(f"AQI fetch error: {e}")
-        return _mock_aqi(lat, lon)
+        fallback = _mock_aqi(lat, lon)
+        score = _aqi_quality_score(fallback)
+        await _persist_aqi_dataset("openweather-fallback", lat, lon, city, fallback, score)
+        await _log_source_ingestion(
+            source="openweather",
+            dataset_type="aqi",
+            payload={"error": str(e)},
+            quality_score=0.0,
+            is_usable=False,
+            retry_count=1,
+            lat=lat,
+            lon=lon,
+            city=city,
+            reason=str(e),
+        )
+        return fallback
 
 
 async def _fetch_aqi_history(lat: float, lon: float, days: int = 7) -> Optional[Dict]:
@@ -460,7 +737,8 @@ async def weather_auto_detect(request: Request):
     """
     # Get client IP
     forwarded = request.headers.get("x-forwarded-for")
-    ip = forwarded.split(",")[0].strip() if forwarded else request.client.host
+    client_host = request.client.host if request.client else "127.0.0.1"
+    ip = forwarded.split(",")[0].strip() if forwarded else client_host
 
     # Resolve IP → location
     location = await _ip_geolocate(ip)
@@ -474,14 +752,17 @@ async def weather_auto_detect(request: Request):
 
     # Fetch weather + AQI in parallel
     weather_data, aqi_data = await asyncio.gather(
-        _fetch_weather(location["lat"], location["lon"]),
-        _fetch_aqi(location["lat"], location["lon"]),
+        _fetch_weather(location["lat"], location["lon"], city=location.get("city")),
+        _fetch_aqi(location["lat"], location["lon"], city=location.get("city")),
         return_exceptions=True,
     )
 
     if isinstance(weather_data, Exception):
         logger.error(f"Weather fetch failed: {weather_data}")
         raise HTTPException(status_code=502, detail="Weather data unavailable")
+
+    if not isinstance(weather_data, dict):
+        raise HTTPException(status_code=502, detail="Weather source returned invalid response")
 
     # Build AI insight (fast, based on data — not LLM)
     current = weather_data.get("current", {})
@@ -506,7 +787,7 @@ async def weather_by_location(
     Response: { current, hourly, daily, location }
     """
     location = await _resolve_location(q, lat, lon)
-    weather_data = await _fetch_weather(location["lat"], location["lon"])
+    weather_data = await _fetch_weather(location["lat"], location["lon"], city=location.get("city"))
 
     return {
         **weather_data,
@@ -548,7 +829,7 @@ async def aqi_by_location(
     Response: { aqi, aqi_label, pm25, pm10, no2, o3, so2, co }
     """
     location = await _resolve_location(q, lat, lon)
-    aqi_data = await _fetch_aqi(location["lat"], location["lon"])
+    aqi_data = await _fetch_aqi(location["lat"], location["lon"], city=location.get("city"))
 
     if not aqi_data:
         raise HTTPException(status_code=502, detail="AQI data unavailable")

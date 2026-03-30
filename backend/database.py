@@ -92,6 +92,15 @@ class User(Base):
     location: Mapped[Optional[Dict]] = mapped_column(JSON)
     geom: Mapped[Any] = mapped_column(SafeGeography(), nullable=True)
     preferences: Mapped[Optional[Dict]] = mapped_column(JSON)
+    # Profile & notification fields
+    bio: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    avatar_url: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    telegram_chat_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    telegram_username: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    notification_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    notification_radius_km: Mapped[Optional[float]] = mapped_column(Float, default=50.0)
+    notification_channels: Mapped[Optional[Dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -319,6 +328,161 @@ class Notification(Base):
     )
 
 
+class EarthquakeDataset(Base):
+    """Dedicated earthquake dataset table for model training."""
+    __tablename__ = 'earthquake_dataset'
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    external_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    source: Mapped[str] = mapped_column(String(100), index=True)
+    title: Mapped[Optional[str]] = mapped_column(String(500))
+    event_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
+    event_date: Mapped[Optional[str]] = mapped_column(String(30), index=True)
+    location: Mapped[Optional[str]] = mapped_column(String(500), index=True)
+    severity: Mapped[Optional[str]] = mapped_column(String(30), index=True)
+    status: Mapped[Optional[str]] = mapped_column(String(50), index=True)
+    magnitude: Mapped[Optional[float]] = mapped_column(Float)
+    depth_km: Mapped[Optional[float]] = mapped_column(Float)
+    lat: Mapped[Optional[float]] = mapped_column(Float, index=True)
+    lon: Mapped[Optional[float]] = mapped_column(Float, index=True)
+    casualties: Mapped[Optional[int]] = mapped_column(Integer)
+    affected_population: Mapped[Optional[int]] = mapped_column(Integer)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    raw_payload: Mapped[Optional[Dict]] = mapped_column(JSON)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class FloodDataset(Base):
+    """Dedicated flood dataset table for model training."""
+    __tablename__ = 'flood_dataset'
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    external_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    source: Mapped[str] = mapped_column(String(100), index=True)
+    title: Mapped[Optional[str]] = mapped_column(String(500))
+    event_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
+    event_date: Mapped[Optional[str]] = mapped_column(String(30), index=True)
+    location: Mapped[Optional[str]] = mapped_column(String(500), index=True)
+    severity: Mapped[Optional[str]] = mapped_column(String(30), index=True)
+    status: Mapped[Optional[str]] = mapped_column(String(50), index=True)
+    lat: Mapped[Optional[float]] = mapped_column(Float, index=True)
+    lon: Mapped[Optional[float]] = mapped_column(Float, index=True)
+    casualties: Mapped[Optional[int]] = mapped_column(Integer)
+    affected_population: Mapped[Optional[int]] = mapped_column(Integer)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    raw_payload: Mapped[Optional[Dict]] = mapped_column(JSON)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class HeatwaveDataset(Base):
+    """Dedicated heatwave dataset table for model training."""
+    __tablename__ = 'heatwave_dataset'
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    external_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    source: Mapped[str] = mapped_column(String(100), index=True)
+    title: Mapped[Optional[str]] = mapped_column(String(500))
+    event_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
+    event_date: Mapped[Optional[str]] = mapped_column(String(30), index=True)
+    location: Mapped[Optional[str]] = mapped_column(String(500), index=True)
+    severity: Mapped[Optional[str]] = mapped_column(String(30), index=True)
+    status: Mapped[Optional[str]] = mapped_column(String(50), index=True)
+    max_temp_c: Mapped[Optional[float]] = mapped_column(Float)
+    lat: Mapped[Optional[float]] = mapped_column(Float, index=True)
+    lon: Mapped[Optional[float]] = mapped_column(Float, index=True)
+    casualties: Mapped[Optional[int]] = mapped_column(Integer)
+    affected_population: Mapped[Optional[int]] = mapped_column(Integer)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    raw_payload: Mapped[Optional[Dict]] = mapped_column(JSON)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class NearbyDisasterDataset(Base):
+    """Nearby disaster observations captured from user-location queries."""
+    __tablename__ = 'nearby_disaster_dataset'
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    query_lat: Mapped[float] = mapped_column(Float, index=True)
+    query_lon: Mapped[float] = mapped_column(Float, index=True)
+    radius_km: Mapped[float] = mapped_column(Float, index=True)
+    alert_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    alert_type: Mapped[Optional[str]] = mapped_column(String(50), index=True)
+    severity: Mapped[Optional[str]] = mapped_column(String(30), index=True)
+    title: Mapped[Optional[str]] = mapped_column(String(500))
+    location: Mapped[Optional[str]] = mapped_column(String(500))
+    source: Mapped[Optional[str]] = mapped_column(String(100), index=True)
+    alert_created_at: Mapped[Optional[str]] = mapped_column(String(100))
+    raw_payload: Mapped[Optional[Dict]] = mapped_column(JSON)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class WeatherDataset(Base):
+    """Stored weather observations fetched from external sources."""
+    __tablename__ = 'weather_dataset'
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    source: Mapped[str] = mapped_column(String(100), index=True)
+    city: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    lat: Mapped[float] = mapped_column(Float, index=True)
+    lon: Mapped[float] = mapped_column(Float, index=True)
+    observation_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    temperature: Mapped[Optional[float]] = mapped_column(Float)
+    humidity: Mapped[Optional[float]] = mapped_column(Float)
+    wind_speed: Mapped[Optional[float]] = mapped_column(Float)
+    pressure: Mapped[Optional[float]] = mapped_column(Float)
+    rain: Mapped[Optional[float]] = mapped_column(Float)
+    condition: Mapped[Optional[str]] = mapped_column(String(100), index=True)
+    weather_code: Mapped[Optional[int]] = mapped_column(Integer, index=True)
+    quality_score: Mapped[float] = mapped_column(Float, default=0.0, index=True)
+    quality_status: Mapped[str] = mapped_column(String(30), default='unknown', index=True)
+    raw_payload: Mapped[Optional[Dict]] = mapped_column(JSON)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class AQIDataset(Base):
+    """Stored AQI observations fetched from external sources."""
+    __tablename__ = 'aqi_dataset'
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    source: Mapped[str] = mapped_column(String(100), index=True)
+    city: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    lat: Mapped[float] = mapped_column(Float, index=True)
+    lon: Mapped[float] = mapped_column(Float, index=True)
+    observation_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    aqi: Mapped[Optional[int]] = mapped_column(Integer, index=True)
+    aqi_index: Mapped[Optional[int]] = mapped_column(Integer, index=True)
+    aqi_label: Mapped[Optional[str]] = mapped_column(String(50), index=True)
+    pm25: Mapped[Optional[float]] = mapped_column(Float)
+    pm10: Mapped[Optional[float]] = mapped_column(Float)
+    no2: Mapped[Optional[float]] = mapped_column(Float)
+    o3: Mapped[Optional[float]] = mapped_column(Float)
+    so2: Mapped[Optional[float]] = mapped_column(Float)
+    co: Mapped[Optional[float]] = mapped_column(Float)
+    quality_score: Mapped[float] = mapped_column(Float, default=0.0, index=True)
+    quality_status: Mapped[str] = mapped_column(String(30), default='unknown', index=True)
+    raw_payload: Mapped[Optional[Dict]] = mapped_column(JSON)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class SourceIngestionLog(Base):
+    """Quality and retry tracking for all third-party source fetches."""
+    __tablename__ = 'source_ingestion_logs'
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    source: Mapped[str] = mapped_column(String(100), index=True)
+    dataset_type: Mapped[str] = mapped_column(String(100), index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)  # success, low_quality, failed
+    quality_score: Mapped[float] = mapped_column(Float, default=0.0, index=True)
+    is_usable: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    reason: Mapped[Optional[str]] = mapped_column(Text)
+    lat: Mapped[Optional[float]] = mapped_column(Float, index=True)
+    lon: Mapped[Optional[float]] = mapped_column(Float, index=True)
+    city: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    payload: Mapped[Optional[Dict]] = mapped_column(JSON)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
 # ==================== DATABASE SESSION DEPENDENCY ====================
 
 async def get_db() -> AsyncSession:
@@ -344,6 +508,20 @@ async def init_db():
             "ALTER TABLE community_posts ADD COLUMN resolved_at DATETIME",
             "ALTER TABLE push_subscriptions ADD COLUMN user_lat REAL",
             "ALTER TABLE push_subscriptions ADD COLUMN user_lon REAL",
+            # Community notifications columns (for older DBs)
+            "ALTER TABLE notifications ADD COLUMN message TEXT",
+            "ALTER TABLE notifications ADD COLUMN from_name TEXT",
+            "ALTER TABLE notifications ADD COLUMN from_photo TEXT",
+            "ALTER TABLE notifications ADD COLUMN is_read BOOLEAN DEFAULT FALSE",
+            # Profile & notification columns
+            "ALTER TABLE users ADD COLUMN bio TEXT",
+            "ALTER TABLE users ADD COLUMN phone TEXT",
+            "ALTER TABLE users ADD COLUMN avatar_url TEXT",
+            "ALTER TABLE users ADD COLUMN telegram_chat_id TEXT",
+            "ALTER TABLE users ADD COLUMN telegram_username TEXT",
+            "ALTER TABLE users ADD COLUMN notification_email TEXT",
+            "ALTER TABLE users ADD COLUMN notification_radius_km REAL DEFAULT 50",
+            "ALTER TABLE users ADD COLUMN notification_channels JSON",
         ]:
             try:
                 await conn.execute(text(stmt))

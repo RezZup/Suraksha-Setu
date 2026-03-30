@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Database,
   UploadCloud,
@@ -21,10 +21,39 @@ import { toast } from 'sonner';
 import DataExport from "@/components/scientist/DataExport";
 import ResearcherChat from "@/components/scientist/ResearcherChat";
 
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+
+const FALLBACK_MODELS = [
+  { id: 'flood_prediction', name: 'Flood Prediction Model v2.1', type: 'Random Forest Regressor', description: 'Predicts water levels based on rainfall intensity and upstream dam release data.', accuracy: 94.2, status: 'active' },
+  { id: 'cyclone_tracker', name: 'Cyclone Path Predictor', type: 'LSTM Neural Network', description: 'Forecasts cyclone trajectory using historical satellite imagery and wind patterns.', accuracy: 89.7, status: 'active' },
+  { id: 'earthquake_early', name: 'Earthquake Early Warning', type: 'Ensemble Model', description: 'Detects P-wave anomalies to provide 10-30 second advance warning.', accuracy: 91.5, status: 'training' },
+  { id: 'landslide_risk', name: 'Landslide Risk Assessment', type: 'Gradient Boosting', description: 'Analyzes soil moisture, terrain slope, and recent rainfall to predict landslide probability.', accuracy: 87.3, status: 'active' },
+];
+
 const ScientistPortal = () => {
   const [uploadingData, setUploadingData] = useState(false);
   const [runningSimulation, setRunningSimulation] = useState(false);
   const [selectedModel, setSelectedModel] = useState(null);
+  const [models, setModels] = useState([]);
+  const [analytics, setAnalytics] = useState(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+
+  useEffect(() => {
+    fetch(`${BACKEND_URL}/api/scientist/models`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.models?.length) setModels(data.models);
+        else setModels(FALLBACK_MODELS);
+      })
+      .catch(() => setModels(FALLBACK_MODELS));
+
+    setAnalyticsLoading(true);
+    fetch(`${BACKEND_URL}/api/scientist/analytics/overview`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => setAnalytics(data))
+      .catch(() => setAnalytics(null))
+      .finally(() => setAnalyticsLoading(false));
+  }, []);
 
   const handleUploadDataset = () => {
     const input = document.createElement('input');
@@ -39,8 +68,7 @@ const ScientistPortal = () => {
       formData.append('file', file);
 
       try {
-        const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
-        const response = await fetch(`${backendUrl}/api/scientist/upload-dataset`, {
+        const response = await fetch(`${BACKEND_URL}/api/scientist/upload-dataset`, {
           method: 'POST',
           body: formData,
           credentials: 'include'
@@ -63,8 +91,7 @@ const ScientistPortal = () => {
   const handleRunSimulation = async () => {
     setRunningSimulation(true);
     try {
-      const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
-      const response = await fetch(`${backendUrl}/api/scientist/run-simulation`, {
+      const response = await fetch(`${BACKEND_URL}/api/scientist/run-simulation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -92,8 +119,7 @@ const ScientistPortal = () => {
 
   const handleExportModel = async (modelId) => {
     try {
-      const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
-      const response = await fetch(`${backendUrl}/api/scientist/export-model/${modelId}`, {
+      const response = await fetch(`${BACKEND_URL}/api/scientist/export-model/${modelId}`, {
         credentials: 'include'
       });
 
@@ -124,8 +150,7 @@ const ScientistPortal = () => {
       formData.append('file', file);
 
       try {
-        const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
-        const response = await fetch(`${backendUrl}/api/scientist/import-model`, {
+        const response = await fetch(`${BACKEND_URL}/api/scientist/import-model`, {
           method: 'POST',
           body: formData,
           credentials: 'include'
@@ -143,40 +168,35 @@ const ScientistPortal = () => {
     input.click();
   };
 
-  const models = [
-    {
-      id: 'flood_prediction',
-      name: 'Flood Prediction Model v2.1',
-      type: 'Random Forest Regressor',
-      description: 'Predicts water levels based on rainfall intensity and upstream dam release data.',
-      accuracy: 94.2,
-      status: 'active'
-    },
-    {
-      id: 'cyclone_tracker',
-      name: 'Cyclone Path Predictor',
-      type: 'LSTM Neural Network',
-      description: 'Forecasts cyclone trajectory using historical satellite imagery and wind patterns.',
-      accuracy: 89.7,
-      status: 'active'
-    },
-    {
-      id: 'earthquake_early',
-      name: 'Earthquake Early Warning',
-      type: 'Ensemble Model',
-      description: 'Detects P-wave anomalies to provide 10-30 second advance warning before major seismic events.',
-      accuracy: 91.5,
-      status: 'training'
-    },
-    {
-      id: 'landslide_risk',
-      name: 'Landslide Risk Assessment',
-      type: 'Gradient Boosting',
-      description: 'Analyzes soil moisture, terrain slope, and recent rainfall to predict landslide probability.',
-      accuracy: 87.3,
-      status: 'active'
+  const models_display = models.map(m => ({
+    id: m.id || m.model_id,
+    name: m.name,
+    type: m.model_type || m.type || '',
+    description: m.description || '',
+    accuracy: m.accuracy_score != null ? (m.accuracy_score * 100).toFixed(1) : m.accuracy,
+    status: m.status || 'active',
+  }));
+
+  const handleExportTrainingDataset = async (datasetType) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/scientist/datasets/export/${datasetType}?limit=200000`);
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `Failed to export ${datasetType} dataset`);
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${datasetType}_dataset.csv`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+      toast.success(`${datasetType} dataset exported as CSV`);
+    } catch (error) {
+      toast.error(error.message || `Error exporting ${datasetType} dataset`);
     }
-  ];
+  };
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -228,74 +248,88 @@ const ScientistPortal = () => {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <Card className="lg:col-span-2">
               <CardHeader>
-                <CardTitle>Timeseries Anomaly Detection</CardTitle>
-                <CardDescription>Real-time sensor data from monitoring stations.</CardDescription>
+                <CardTitle>Real Dataset Ingestion Trend (14 days)</CardTitle>
+                <CardDescription>Rows persisted from live external sources.</CardDescription>
               </CardHeader>
-              <CardContent className="h-[400px] bg-muted/20 flex items-center justify-center border rounded-lg">
-                <div className="text-center text-muted-foreground">
-                  <LineChart className="w-12 h-12 mx-auto mb-4 opacity-50" />
-                  <p>Interactive D3.js / Recharts Graph Area</p>
-                  <p className="text-xs mt-2">Showing PM2.5 spikes correlated with wind direction</p>
-                </div>
+              <CardContent className="border rounded-lg p-4 space-y-3">
+                {analyticsLoading ? (
+                  <div className="h-[260px] flex items-center justify-center text-muted-foreground">Loading analytics...</div>
+                ) : analytics?.daily_ingestion?.length ? (
+                  analytics.daily_ingestion.map((d) => {
+                    const maxRows = Math.max(...analytics.daily_ingestion.map(x => x.rows), 1);
+                    const pct = Math.round((d.rows / maxRows) * 100);
+                    return (
+                      <div key={d.date}>
+                        <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                          <span>{d.date}</span>
+                          <span>{d.rows} rows</span>
+                        </div>
+                        <div className="h-2 w-full rounded bg-muted overflow-hidden">
+                          <div className="h-full bg-primary" style={{ width: `${pct}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="h-[260px] flex items-center justify-center text-muted-foreground">No ingestion trend data yet.</div>
+                )}
               </CardContent>
             </Card>
 
             <div className="space-y-6">
               <Card>
                 <CardHeader>
-                  <CardTitle>Data Sources</CardTitle>
+                  <CardTitle>Real Source Health</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="flex items-center justify-between p-3 border rounded-lg bg-card hover:bg-muted/50 transition-colors cursor-pointer">
-                    <div className="flex items-center gap-3">
-                      <Database className="w-4 h-4 text-primary" />
-                      <div>
-                        <p className="text-sm font-medium">IMD Weather API</p>
-                        <p className="text-xs text-muted-foreground">Live Stream • 50ms latency</p>
-                      </div>
-                    </div>
-                    <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                  <div className="p-3 border rounded-lg">
+                    <p className="text-sm font-medium">Average Quality Score</p>
+                    <p className="text-2xl font-bold mt-1">{analytics?.quality?.average_quality_score ?? 0}</p>
                   </div>
-                  <div className="flex items-center justify-between p-3 border rounded-lg bg-card hover:bg-muted/50 transition-colors cursor-pointer">
-                    <div className="flex items-center gap-3">
-                      <Database className="w-4 h-4 text-primary" />
-                      <div>
-                        <p className="text-sm font-medium">IoT Sensor Grid A</p>
-                        <p className="text-xs text-muted-foreground">Updated 2m ago</p>
-                      </div>
-                    </div>
-                    <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                  <div className="p-3 border rounded-lg">
+                    <p className="text-sm font-medium">Usable Rows</p>
+                    <p className="text-2xl font-bold mt-1">{analytics?.quality?.usable_rows ?? 0}</p>
                   </div>
-                  <div className="flex items-center justify-between p-3 border rounded-lg bg-card hover:bg-muted/50 transition-colors cursor-pointer">
-                    <div className="flex items-center gap-3">
-                      <Database className="w-4 h-4 text-primary" />
-                      <div>
-                        <p className="text-sm font-medium">Historical Flood Data</p>
-                        <p className="text-xs text-muted-foreground">Static Dataset (CSV)</p>
-                      </div>
-                    </div>
-                    <div className="w-2 h-2 rounded-full bg-gray-300"></div>
+                  <div className="p-3 border rounded-lg">
+                    <p className="text-sm font-medium">Low-Quality Rows</p>
+                    <p className="text-2xl font-bold mt-1">{analytics?.quality?.low_quality_rows ?? 0}</p>
                   </div>
                 </CardContent>
               </Card>
 
               <Card>
                 <CardHeader>
-                  <CardTitle>Quick Tools</CardTitle>
+                  <CardTitle>Top Sources</CardTitle>
                 </CardHeader>
-                <CardContent className="grid grid-cols-2 gap-2">
-                  <Button variant="outline" className="h-20 flex flex-col gap-2">
-                    <FileText className="w-5 h-5" />
-                    Export CSV
-                  </Button>
-                  <Button variant="outline" className="h-20 flex flex-col gap-2">
-                    <Download className="w-5 h-5" />
-                    Download Report
-                  </Button>
+                <CardContent className="space-y-2">
+                  {(analytics?.top_sources || []).slice(0, 5).map((s) => (
+                    <div key={s.source} className="flex justify-between border rounded px-3 py-2 text-sm">
+                      <span>{s.source}</span>
+                      <span className="font-semibold">{s.rows}</span>
+                    </div>
+                  ))}
+                  {(!analytics?.top_sources || analytics.top_sources.length === 0) && (
+                    <p className="text-sm text-muted-foreground">No source data yet.</p>
+                  )}
                 </CardContent>
               </Card>
             </div>
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Dataset Coverage</CardTitle>
+              <CardDescription>Rows currently available for training and evaluation.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+              {Object.entries(analytics?.dataset_counts || {}).filter(([k]) => k !== 'total').map(([key, value]) => (
+                <div key={key} className="border rounded-lg p-3">
+                  <p className="text-xs uppercase text-muted-foreground">{key}</p>
+                  <p className="text-xl font-bold mt-1">{value}</p>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="assistant" className="space-y-6">
@@ -332,7 +366,7 @@ const ScientistPortal = () => {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
-            {models.map((model) => (
+            {models_display.map((model) => (
               <Card
                 key={model.id}
                 className="hover:border-primary/50 transition-colors cursor-pointer"
@@ -556,7 +590,38 @@ const ScientistPortal = () => {
         </TabsContent>
 
         <TabsContent value="export">
-          <DataExport />
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Training Dataset Exports</CardTitle>
+                <CardDescription>Download stored real datasets as CSV for model training.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                <Button variant="outline" className="justify-start gap-2" onClick={() => handleExportTrainingDataset('earthquake')}>
+                  <Download className="w-4 h-4" /> Earthquake CSV
+                </Button>
+                <Button variant="outline" className="justify-start gap-2" onClick={() => handleExportTrainingDataset('flood')}>
+                  <Download className="w-4 h-4" /> Flood CSV
+                </Button>
+                <Button variant="outline" className="justify-start gap-2" onClick={() => handleExportTrainingDataset('heatwave')}>
+                  <Download className="w-4 h-4" /> Heatwave CSV
+                </Button>
+                <Button variant="outline" className="justify-start gap-2" onClick={() => handleExportTrainingDataset('nearby')}>
+                  <Download className="w-4 h-4" /> Nearby CSV
+                </Button>
+                <Button variant="outline" className="justify-start gap-2" onClick={() => handleExportTrainingDataset('weather')}>
+                  <Download className="w-4 h-4" /> Weather CSV
+                </Button>
+                <Button variant="outline" className="justify-start gap-2" onClick={() => handleExportTrainingDataset('aqi')}>
+                  <Download className="w-4 h-4" /> AQI CSV
+                </Button>
+                <Button variant="outline" className="justify-start gap-2" onClick={() => handleExportTrainingDataset('ingestion')}>
+                  <Download className="w-4 h-4" /> Source Log CSV
+                </Button>
+              </CardContent>
+            </Card>
+            <DataExport />
+          </div>
         </TabsContent>
       </Tabs>
     </div >

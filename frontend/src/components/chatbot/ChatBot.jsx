@@ -11,10 +11,14 @@ import ChatMessage from './ChatMessage';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
-
-// Debug logging
-console.log('ChatBot - REACT_APP_BACKEND_URL:', process.env.REACT_APP_BACKEND_URL);
-console.log('ChatBot - BACKEND_URL:', BACKEND_URL);
+const API_URL = `${BACKEND_URL}/api/ai/chat`;
+const DEFAULT_SUGGESTIONS = [
+  'What should I do during an earthquake?',
+  'How to prepare for a cyclone?',
+  'Flood safety checklist for families',
+  'Emergency contacts in India',
+  'Heatwave precautions for children and elders',
+];
 
 const ChatBot = () => {
   const [isOpen, setIsOpen] = useState(false);
@@ -29,6 +33,8 @@ const ChatBot = () => {
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const { user } = useAuth();
+
+  const buildStorageKey = (id) => `chatbot_history_${id}`;
 
   // Generate session ID on mount
   useEffect(() => {
@@ -51,6 +57,11 @@ const ChatBot = () => {
       }]);
     }
   }, []);
+
+  useEffect(() => {
+    if (!sessionId || messages.length === 0) return;
+    localStorage.setItem(buildStorageKey(sessionId), JSON.stringify(messages));
+  }, [messages, sessionId]);
 
   // Load suggestions and focus input when opened
   useEffect(() => {
@@ -85,26 +96,30 @@ const ChatBot = () => {
 
   const loadChatHistory = async (sessionId) => {
     try {
-      const response = await axios.get(`${BACKEND_URL}/api/chatbot/history`, {
-        params: { session_id: sessionId }
-      });
-      if (response.data.messages && response.data.messages.length > 0) {
-        setMessages(response.data.messages);
+      const stored = localStorage.getItem(buildStorageKey(sessionId));
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setMessages(parsed);
+          return;
+        }
       }
+
+      setMessages([{
+        id: 'welcome',
+        message: '',
+        response: '👋 Hello! I\'m Suraksha Setu, your disaster management assistant. Ask about weather, alerts, safety tips, and emergency readiness.',
+        timestamp: new Date().toISOString(),
+        isUser: false
+      }]);
     } catch (error) {
       console.error('Error loading chat history:', error);
     }
   };
 
   const loadSuggestions = async () => {
-    try {
-      const response = await axios.get(`${BACKEND_URL}/api/chatbot/suggestions`);
-      const allSuggestions = response.data.suggestions || [];
-      setSuggestions(allSuggestions);
-      setFilteredSuggestions(allSuggestions.slice(0, 3));
-    } catch (error) {
-      console.error('Error loading suggestions:', error);
-    }
+    setSuggestions(DEFAULT_SUGGESTIONS);
+    setFilteredSuggestions(DEFAULT_SUGGESTIONS.slice(0, 3));
   };
 
   // Filter suggestions based on user input
@@ -217,12 +232,14 @@ const ChatBot = () => {
     setIsTyping(true);
 
     try {
-      const response = await axios.post(`${BACKEND_URL}/api/chatbot/message`, {
+      const response = await axios.post(API_URL, {
         message: textToSend,
-        session_id: sessionId,
-        user_id: user?.id,
+        query: textToSend,
+        role: 'citizen',
         context: {
-          user_location: 'India' // Can be enhanced with actual geolocation
+          user_location: 'India',
+          session_id: sessionId,
+          user_id: user?.id,
         }
       });
 
@@ -230,7 +247,7 @@ const ChatBot = () => {
       const botMessage = {
         id: response.data.id || `bot_${Date.now()}`,
         message: textToSend,
-        response: response.data.response,
+        response: response.data.response || response.data.answer || 'I could not generate a response right now.',
         timestamp: response.data.timestamp || new Date().toISOString(),
         isUser: false
       };
@@ -273,12 +290,11 @@ const ChatBot = () => {
   const clearHistory = async () => {
     if (window.confirm('Are you sure you want to clear chat history?')) {
       try {
-        await axios.delete(`${BACKEND_URL}/api/chatbot/clear`, {
-          params: { session_id: sessionId }
-        });
-        
         // Create new session
         const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        if (sessionId) {
+          localStorage.removeItem(buildStorageKey(sessionId));
+        }
         setSessionId(newSessionId);
         localStorage.setItem('chatbot_session_id', newSessionId);
         

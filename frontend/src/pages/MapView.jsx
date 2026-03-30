@@ -29,11 +29,24 @@ import axios from 'axios';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
+const haversineKm = (lat1, lon1, lat2, lon2) => {
+  const toRad = (v) => (v * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
 const MapView = () => {
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [center, setCenter] = useState([20.5937, 78.9629]); // India center
   const [searchRadius, setSearchRadius] = useState(null);
+  const [radiusKm, setRadiusKm] = useState(10);
   const [locationLabel, setLocationLabel] = useState('');
   const [weatherData, setWeatherData] = useState(null);
   const [aqiData, setAQIData] = useState(null);
@@ -52,6 +65,20 @@ const MapView = () => {
   });
 
   const [allDisasters, setAllDisasters] = useState([]);
+
+  const filteredAlerts = (alerts || []).filter((a) => {
+    if (!searchRadius || !center) return true;
+    const lat = a?.coordinates?.lat ?? a?.position?.lat;
+    const lon = a?.coordinates?.lon ?? a?.coordinates?.lng ?? a?.position?.lon ?? a?.position?.lng;
+    if (lat == null || lon == null) return false;
+    return haversineKm(center[0], center[1], Number(lat), Number(lon)) <= radiusKm;
+  });
+
+  const filteredDisasters = (allDisasters || []).filter((d) => {
+    if (!searchRadius || !center) return true;
+    if (d?.lat == null || d?.lon == null) return false;
+    return haversineKm(center[0], center[1], Number(d.lat), Number(d.lon)) <= radiusKm;
+  });
 
   useEffect(() => {
     loadLocationData(center[0], center[1]);
@@ -107,17 +134,15 @@ const MapView = () => {
     setSearchRadius(null);
 
     try {
-      // PIN code (6 digits)
-      if (/^\d{6}$/.test(query)) {
-        const res = await axios.post(`${API_URL}/api/location/validate-pincode`, { pincode: query });
-        const data = res.data;
-        if (data.valid && data.lat && data.lon) {
-          setCenter([data.lat, data.lon]);
-          setSearchRadius(10000);
-          setLocationLabel(data.display_name || `PIN ${query}`);
-          await loadLocationData(data.lat, data.lon);
-          return;
-        }
+      // Geocode by pincode/address/city using backend location search endpoint
+      const geoRes = await axios.post(`${API_URL}/api/location/search`, { query });
+      const geoData = geoRes.data;
+      if (geoData?.success && geoData?.lat && geoData?.lon) {
+        setCenter([geoData.lat, geoData.lon]);
+        setSearchRadius(radiusKm * 1000);
+        setLocationLabel(geoData.display_name || query);
+        await loadLocationData(geoData.lat, geoData.lon);
+        return;
       }
 
       // Coordinates (lat, lon)
@@ -126,23 +151,13 @@ const MapView = () => {
         const lat = parseFloat(coordMatch[1]);
         const lon = parseFloat(coordMatch[2]);
         setCenter([lat, lon]);
-        setSearchRadius(10000);
+        setSearchRadius(radiusKm * 1000);
         setLocationLabel(`${lat.toFixed(4)}, ${lon.toFixed(4)}`);
         await loadLocationData(lat, lon);
         return;
       }
 
-      // City name
-      const weather = await getWeatherByLocation(query);
-      if (weather?.current?.coordinates) {
-        const { lat, lon } = weather.current.coordinates;
-        setCenter([lat, lon]);
-        setSearchRadius(10000);
-        setLocationLabel(weather.current.location || query);
-        await loadLocationData(lat, lon);
-      } else {
-        setError('Location not found');
-      }
+      setError('Location not found');
     } catch (err) {
       console.error('Search error:', err);
       setError('Location not found. Try PIN code, city name, or coordinates (lat, lon)');
@@ -161,7 +176,7 @@ const MapView = () => {
         const lat = pos.coords.latitude;
         const lon = pos.coords.longitude;
         setCenter([lat, lon]);
-        setSearchRadius(10000);
+        setSearchRadius(radiusKm * 1000);
         setLocationLabel('My Location');
         await loadLocationData(lat, lon);
       },
@@ -187,12 +202,12 @@ const MapView = () => {
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Live Map</h1>
-          <p className="text-muted-foreground">Search by PIN code, city, or coordinates — shows 10 km radius</p>
+          <p className="text-muted-foreground">Search by PIN code, address, city, or coordinates — shows results within selected radius</p>
         </div>
         {searchRadius && locationLabel && (
           <Badge variant="outline" className="gap-1 text-sm px-3 py-1">
             <MapPin className="w-3.5 h-3.5" />
-            {locationLabel} · 10 km radius
+            {locationLabel} · {radiusKm} km radius
           </Badge>
         )}
       </div>
@@ -216,6 +231,23 @@ const MapView = () => {
               <Navigation className="w-4 h-4" />
             </Button>
           </form>
+          <div className="mt-3 flex items-center gap-2">
+            <Label htmlFor="radius-km" className="text-sm whitespace-nowrap">Range</Label>
+            <Input
+              id="radius-km"
+              type="number"
+              min={1}
+              max={500}
+              value={radiusKm}
+              onChange={(e) => {
+                const next = Math.max(1, Math.min(500, Number(e.target.value) || 10));
+                setRadiusKm(next);
+                if (searchRadius) setSearchRadius(next * 1000);
+              }}
+              className="w-28"
+            />
+            <span className="text-sm text-muted-foreground">km</span>
+          </div>
           {error && (
             <div className="mt-2 flex items-center gap-2 text-destructive text-sm">
               <AlertCircle className="w-4 h-4" />
@@ -242,7 +274,8 @@ const MapView = () => {
             showLayers={showLayers}
             searchRadius={searchRadius}
             alerts={alerts}
-            disasters={allDisasters}
+            alerts={filteredAlerts}
+            disasters={filteredDisasters}
           />
         </div>
 

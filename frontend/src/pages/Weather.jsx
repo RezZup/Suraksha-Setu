@@ -84,14 +84,13 @@ const Weather = () => {
             lat: response.data.location.lat,
             lon: response.data.location.lon
           });
-          console.log('AQI Data from auto-detect:', aqiData);
           setAQIData(aqiData);
           
           // Load 7-day AQI history
           const historyResponse = await axios.get(
             `${BACKEND}/api/aqi/history?lat=${response.data.location.lat}&lon=${response.data.location.lon}&days=7`
           );
-          setAQIHistory(historyResponse.data);
+          setAQIHistory(historyResponse.data?.source === 'openweather' ? historyResponse.data : null);
         } catch (err) {
           console.error('AQI data fetch error:', err);
           setAQIData(null);
@@ -126,7 +125,6 @@ const Weather = () => {
       }
 
       if (aqi.status === 'fulfilled' && aqi.value) {
-        console.log('AQI Data received:', aqi.value);
         setAQIData(aqi.value);
         
         // Load 7-day AQI history
@@ -135,7 +133,7 @@ const Weather = () => {
           const historyResponse = await axios.get(
             `${BACKEND}/api/aqi/history?lat=${coords.lat}&lon=${coords.lon}&days=7`
           );
-          setAQIHistory(historyResponse.data);
+          setAQIHistory(historyResponse.data?.source === 'openweather' ? historyResponse.data : null);
         } catch (err) {
           console.error('AQI history fetch error:', err);
           setAQIHistory(null);
@@ -229,23 +227,15 @@ const Weather = () => {
     temp: `${Math.round(day.high || day.temperature_max || 0)}°`,
     tempLow: `${Math.round(day.low || day.temperature_min || 0)}°`,
     status: day.condition || 'Clear'
-  })) || [
-    { day: 'Today', icon: CloudRain, temp: '32°', tempLow: '24°', status: 'Rainy' },
-    { day: 'Mon', icon: Sun, temp: '34°', tempLow: '25°', status: 'Sunny' },
-    { day: 'Tue', icon: CloudFog, temp: '30°', tempLow: '23°', status: 'Cloudy' },
-    { day: 'Wed', icon: Wind, temp: '29°', tempLow: '22°', status: 'Windy' },
-    { day: 'Thu', icon: Sun, temp: '33°', tempLow: '24°', status: 'Sunny' },
-    { day: 'Fri', icon: CloudRain, temp: '28°', tempLow: '21°', status: 'Storm' },
-    { day: 'Sat', icon: Sun, temp: '31°', tempLow: '23°', status: 'Clear' },
-  ];
+  })) || [];
 
   const current = weatherData?.current || {};
-  const currentTemp = Math.round(current.temperature || 32);
-  const feelsLike = Math.round(current.apparent_temperature || currentTemp + 6);
-  const humidity = Math.round(current.humidity || 68);
-  const windSpeed = Math.round(current.wind_speed || 12);
-  const windDirection = current.wind_direction || 'NW';
-  const pressure = Math.round(current.pressure || 1008);
+  const currentTemp = Number.isFinite(current.temperature) ? Math.round(current.temperature) : null;
+  const feelsLike = Number.isFinite(current.apparent_temperature) ? Math.round(current.apparent_temperature) : null;
+  const humidity = Number.isFinite(current.humidity) ? Math.round(current.humidity) : null;
+  const windSpeed = Number.isFinite(current.wind_speed) ? Math.round(current.wind_speed) : null;
+  const windDirection = current.wind_direction || '--';
+  const pressure = Number.isFinite(current.pressure) ? Math.round(current.pressure) : null;
   const aqiValue = aqiData?.aqi ?? aqiData?.current?.aqi ?? null;
   const aqiStatus = aqiData?.aqi_label || aqiData?.current?.category || 'N/A';
   const pm25 = aqiData?.pm25 ?? aqiData?.current?.pm25 ?? null;
@@ -345,11 +335,11 @@ const Weather = () => {
               <>
                 <div className="mt-8 flex items-center gap-8">
                   <div className="text-8xl font-bold tracking-tighter">
-                    {currentTemp}°
+                    {currentTemp != null ? `${currentTemp}°` : '--'}
                   </div>
                   <div className="space-y-1">
-                    <div className="text-2xl font-medium">{current.condition || 'Partly Cloudy'}</div>
-                    <div className="text-blue-100">Feels like {feelsLike}°</div>
+                    <div className="text-2xl font-medium">{current.condition || 'Data unavailable'}</div>
+                    <div className="text-blue-100">Feels like {feelsLike != null ? `${feelsLike}°` : '--'}</div>
                   </div>
                 </div>
 
@@ -363,7 +353,7 @@ const Weather = () => {
                     <div className="flex items-center gap-2 text-blue-100 mb-1">
                       <Wind className="w-4 h-4" /> Wind
                     </div>
-                    <div className="text-2xl font-bold">{windSpeed}</div>
+                    <div className="text-2xl font-bold">{windSpeed != null ? windSpeed : '--'}</div>
                     <div className="text-xs text-blue-200">km/h {windDirection}</div>
                   </motion.div>
                   <motion.div
@@ -375,8 +365,8 @@ const Weather = () => {
                     <div className="flex items-center gap-2 text-blue-100 mb-1">
                       <Droplets className="w-4 h-4" /> Humidity
                     </div>
-                    <div className="text-2xl font-bold">{humidity}%</div>
-                    <div className="text-xs text-blue-200">Dew {Math.round(currentTemp - ((100 - humidity) / 5))}°</div>
+                    <div className="text-2xl font-bold">{humidity != null ? `${humidity}%` : '--'}</div>
+                    <div className="text-xs text-blue-200">Dew {currentTemp != null && humidity != null ? `${Math.round(currentTemp - ((100 - humidity) / 5))}°` : '--'}</div>
                   </motion.div>
                   <motion.div
                     initial={{ opacity: 0, y: 20 }}
@@ -387,7 +377,7 @@ const Weather = () => {
                     <div className="flex items-center gap-2 text-blue-100 mb-1">
                       <Gauge className="w-4 h-4" /> Pressure
                     </div>
-                    <div className="text-2xl font-bold">{pressure}</div>
+                    <div className="text-2xl font-bold">{pressure != null ? pressure : '--'}</div>
                     <div className="text-xs text-blue-200">hPa</div>
                   </motion.div>
                   <motion.div
@@ -399,7 +389,7 @@ const Weather = () => {
                     <div className="flex items-center gap-2 text-blue-100 mb-1">
                       <Eye className="w-4 h-4" /> Visibility
                     </div>
-                    <div className="text-2xl font-bold">{current.visibility || 10}</div>
+                    <div className="text-2xl font-bold">{Number.isFinite(current.visibility) ? current.visibility : '--'}</div>
                     <div className="text-xs text-blue-200">km</div>
                   </motion.div>
                 </div>
@@ -523,7 +513,8 @@ const Weather = () => {
                       <Zap className="w-3 h-3" /> Health Advice
                     </div>
                     <p className="text-muted-foreground leading-relaxed">
-                      {aqiValue <= 50 ? '✅ Air quality is excellent. Perfect for outdoor activities!' :
+                       {aqiValue == null ? 'AQI live data is currently unavailable for this location.' :
+                        aqiValue <= 50 ? '✅ Air quality is excellent. Perfect for outdoor activities!' :
                        aqiValue <= 100 ? '😊 Air quality is acceptable. Enjoy your day!' :
                        aqiValue <= 150 ? '⚠️ Sensitive groups should limit prolonged outdoor exposure.' :
                        aqiValue <= 200 ? '🚫 Everyone should reduce outdoor activities.' :
@@ -549,9 +540,7 @@ const Weather = () => {
               <CardTitle className="flex items-center gap-2">
                 <TrendingUp className="w-5 h-5 text-purple-600" />
                 7-Day AQI Trend
-                <Badge variant="secondary" className="ml-auto">
-                  {aqiHistory.source === 'openweather' ? 'Live Data' : 'Simulated'}
-                </Badge>
+                <Badge variant="secondary" className="ml-auto">Live Data</Badge>
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -620,7 +609,7 @@ const Weather = () => {
               <div className="mt-4 grid grid-cols-3 gap-4">
                 {aqiHistory.history.slice(-3).map((day, idx) => (
                   <motion.div
-                    key={day.date}
+                    key={`${day.date || 'day'}-${idx}`}
                     initial={{ opacity: 0, scale: 0.9 }}
                     animate={{ opacity: 1, scale: 1 }}
                     transition={{ delay: 0.1 * idx }}

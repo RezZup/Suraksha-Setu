@@ -6,11 +6,78 @@ from typing import Optional
 import logging
 import httpx
 import asyncio
+import uuid
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
 disasters_router = APIRouter(prefix="/api", tags=["Disasters"])
+
+
+def _parse_event_datetime(event_date: Optional[str]) -> Optional[datetime]:
+    if not event_date:
+        return None
+    try:
+        if len(event_date) == 10:
+            return datetime.strptime(event_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(event_date.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+async def _persist_disaster_training_rows(disasters: list) -> None:
+    """Persist earthquake/flood/heatwave events into dedicated training tables."""
+    if not disasters:
+        return
+
+    from sqlalchemy import select
+    from database import AsyncSessionLocal, EarthquakeDataset, FloodDataset, HeatwaveDataset
+
+    async with AsyncSessionLocal() as db:
+        for event in disasters:
+            event_type = (event.get("type") or "").lower()
+            if event_type not in {"earthquake", "flood", "heatwave"}:
+                continue
+
+            external_id = str(event.get("id") or f"{event_type}_{uuid.uuid4().hex[:12]}")
+            model = (
+                EarthquakeDataset if event_type == "earthquake"
+                else FloodDataset if event_type == "flood"
+                else HeatwaveDataset
+            )
+
+            existing = await db.execute(select(model).where(model.external_id == external_id))
+            row = existing.scalar_one_or_none()
+
+            values = {
+                "source": event.get("source", "unknown"),
+                "title": event.get("title"),
+                "event_time": _parse_event_datetime(event.get("date")),
+                "event_date": event.get("date"),
+                "location": event.get("location"),
+                "severity": event.get("severity"),
+                "status": event.get("status"),
+                "lat": event.get("lat"),
+                "lon": event.get("lon"),
+                "casualties": event.get("casualties"),
+                "affected_population": event.get("affected_population"),
+                "description": event.get("description"),
+                "raw_payload": event,
+            }
+
+            if model is EarthquakeDataset:
+                values["magnitude"] = event.get("magnitude")
+                values["depth_km"] = event.get("depth_km")
+            elif model is HeatwaveDataset:
+                values["max_temp_c"] = event.get("max_temp_c")
+
+            if row:
+                for key, value in values.items():
+                    setattr(row, key, value)
+            else:
+                db.add(model(id=str(uuid.uuid4()), external_id=external_id, **values))
+
+        await db.commit()
 
 # Historical disaster data baseline
 HISTORICAL_DISASTERS = [
@@ -282,6 +349,13 @@ async def get_disasters(
             ]
 
         disasters.sort(key=lambda x: x.get("date", ""), reverse=True)
+
+        # Persist dedicated real-data training datasets (non-blocking to API response quality)
+        try:
+            await _persist_disaster_training_rows(disasters)
+        except Exception as persist_err:
+            logger.warning("Dataset persistence skipped due to error: %s", persist_err)
+
         return {"disasters": disasters[:limit]}
 
     except Exception as e:

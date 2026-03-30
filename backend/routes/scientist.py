@@ -2,6 +2,7 @@
 Scientist API Routes — dataset analysis, simulations, and model management
 """
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +15,18 @@ import logging
 import numpy as np
 from datetime import datetime, timezone
 
-from database import get_db, Alert, CommunityReport
+from database import (
+    get_db,
+    Alert,
+    CommunityReport,
+    EarthquakeDataset,
+    FloodDataset,
+    HeatwaveDataset,
+    NearbyDisasterDataset,
+    WeatherDataset,
+    AQIDataset,
+    SourceIngestionLog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +45,23 @@ class SimulationRequest(BaseModel):
 
 ALLOWED_EXTENSIONS = {".csv", ".json", ".geojson", ".xlsx"}
 MAX_UPLOAD_SIZE_MB = 50
+
+
+def _serialize_csv_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=True)
+    return value
+
+
+def _csv_stream(rows, columns):
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=columns)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({c: _serialize_csv_value(getattr(row, c, None)) for c in columns})
+    return io.BytesIO(buffer.getvalue().encode("utf-8"))
 
 
 @scientist_router.post("/upload-dataset")
@@ -323,6 +352,104 @@ async def list_datasets():
     }
 
 
+@scientist_router.get("/datasets/export/{dataset_type}")
+async def export_training_dataset_csv(
+    dataset_type: str,
+    limit: int = 50000,
+    include_raw: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Export stored training datasets as CSV."""
+    ds = dataset_type.strip().lower()
+    model_map = {
+        "earthquake": EarthquakeDataset,
+        "flood": FloodDataset,
+        "heatwave": HeatwaveDataset,
+        "nearby": NearbyDisasterDataset,
+        "weather": WeatherDataset,
+        "aqi": AQIDataset,
+        "ingestion": SourceIngestionLog,
+    }
+
+    if ds not in model_map:
+        raise HTTPException(status_code=400, detail="dataset_type must be one of: earthquake, flood, heatwave, nearby, weather, aqi, ingestion")
+
+    model = model_map[ds]
+    result = await db.execute(select(model).order_by(model.ingested_at.desc() if hasattr(model, "ingested_at") else model.captured_at.desc()).limit(max(1, min(limit, 200000))))
+    rows = result.scalars().all()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No rows found for dataset '{ds}'")
+
+    columns = [c.name for c in model.__table__.columns]
+    if not include_raw and "raw_payload" in columns:
+        columns.remove("raw_payload")
+
+    filename = f"{ds}_dataset_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+    stream = _csv_stream(rows, columns)
+    headers = {"Content-Disposition": f"attachment; filename={filename}"}
+    return StreamingResponse(stream, media_type="text/csv", headers=headers)
+
+
+@scientist_router.get("/analytics/overview")
+async def analytics_overview(db: AsyncSession = Depends(get_db)):
+    """Return real dataset analytics summary and quality metrics."""
+    eq_count = int((await db.execute(select(func.count()).select_from(EarthquakeDataset))).scalar() or 0)
+    flood_count = int((await db.execute(select(func.count()).select_from(FloodDataset))).scalar() or 0)
+    heat_count = int((await db.execute(select(func.count()).select_from(HeatwaveDataset))).scalar() or 0)
+    nearby_count = int((await db.execute(select(func.count()).select_from(NearbyDisasterDataset))).scalar() or 0)
+    weather_count = int((await db.execute(select(func.count()).select_from(WeatherDataset))).scalar() or 0)
+    aqi_count = int((await db.execute(select(func.count()).select_from(AQIDataset))).scalar() or 0)
+
+    ingest_rows = (await db.execute(
+        select(SourceIngestionLog).order_by(SourceIngestionLog.ingested_at.desc()).limit(5000)
+    )).scalars().all()
+
+    usable_count = sum(1 for r in ingest_rows if r.is_usable)
+    avg_quality = round(float(np.mean([r.quality_score for r in ingest_rows])) if ingest_rows else 0.0, 3)
+    low_quality_count = sum(1 for r in ingest_rows if r.quality_score < 0.65)
+    total_retries = int(sum((r.retry_count or 0) for r in ingest_rows))
+
+    by_source = {}
+    daily = {}
+    for r in ingest_rows:
+        src = r.source or "unknown"
+        by_source[src] = by_source.get(src, 0) + 1
+        day = (r.ingested_at.date().isoformat() if r.ingested_at else "unknown")
+        if day != "unknown":
+            daily[day] = daily.get(day, 0) + 1
+
+    top_sources = [
+        {"source": k, "rows": v}
+        for k, v in sorted(by_source.items(), key=lambda item: item[1], reverse=True)[:10]
+    ]
+    daily_ingestion = [
+        {"date": k, "rows": v}
+        for k, v in sorted(daily.items(), key=lambda item: item[0])[-14:]
+    ]
+
+    return {
+        "dataset_counts": {
+            "earthquake": eq_count,
+            "flood": flood_count,
+            "heatwave": heat_count,
+            "nearby": nearby_count,
+            "weather": weather_count,
+            "aqi": aqi_count,
+            "total": eq_count + flood_count + heat_count + nearby_count + weather_count + aqi_count,
+        },
+        "quality": {
+            "average_quality_score": avg_quality,
+            "usable_rows": usable_count,
+            "total_logs_sampled": len(ingest_rows),
+            "low_quality_rows": low_quality_count,
+            "total_retries": total_retries,
+        },
+        "top_sources": top_sources,
+        "daily_ingestion": daily_ingestion,
+    }
+
+
 @scientist_router.get("/simulations")
 async def list_simulations():
     """List all completed simulations."""
@@ -350,33 +477,64 @@ async def get_simulation(simulation_id: str):
 
 
 @scientist_router.get("/models")
-async def list_available_models():
-    """List available simulation models."""
+async def list_available_models(db: AsyncSession = Depends(get_db)):
+    """List available simulation models and real dataset readiness."""
+    eq_count = (await db.execute(select(func.count()).select_from(EarthquakeDataset))).scalar() or 0
+    flood_count = (await db.execute(select(func.count()).select_from(FloodDataset))).scalar() or 0
+    heat_count = (await db.execute(select(func.count()).select_from(HeatwaveDataset))).scalar() or 0
+    nearby_count = (await db.execute(select(func.count()).select_from(NearbyDisasterDataset))).scalar() or 0
+    weather_count = (await db.execute(select(func.count()).select_from(WeatherDataset))).scalar() or 0
+    aqi_count = (await db.execute(select(func.count()).select_from(AQIDataset))).scalar() or 0
+
+    total_rows = int(eq_count + flood_count + heat_count + nearby_count + weather_count + aqi_count)
+    recommended_min_rows = 1000
+
     return {
+        "training_ready": total_rows >= recommended_min_rows,
+        "training_required": True,
+        "note": "Current simulation endpoints are statistical/synthetic. Upload or ingest real datasets and train model artifacts for production ML.",
+        "dataset_summary": {
+            "earthquake_rows": int(eq_count),
+            "flood_rows": int(flood_count),
+            "heatwave_rows": int(heat_count),
+            "nearby_rows": int(nearby_count),
+            "weather_rows": int(weather_count),
+            "aqi_rows": int(aqi_count),
+            "total_rows": total_rows,
+            "recommended_min_rows": recommended_min_rows,
+        },
         "models": [
             {
                 "id": "flood_prediction",
                 "name": "Flood Risk Prediction",
                 "description": "Statistical flood risk analysis using historical alerts and rainfall data",
                 "parameters": {"rainfall_threshold_mm": "float", "region": "string"},
+                "trained": False,
+                "status": "simulation",
             },
             {
                 "id": "earthquake_risk",
                 "name": "Earthquake Risk Assessment",
                 "description": "Seismic risk analysis using Gutenberg-Richter frequency-magnitude relationships",
                 "parameters": {"min_magnitude": "float", "region": "string"},
+                "trained": False,
+                "status": "simulation",
             },
             {
                 "id": "cyclone_trajectory",
                 "name": "Cyclone Trajectory Prediction",
                 "description": "Cyclone path simulation using historical trajectory patterns",
                 "parameters": {"start_lat": "float", "start_lon": "float"},
+                "trained": False,
+                "status": "simulation",
             },
             {
                 "id": "aqi_forecast",
                 "name": "AQI Forecast",
                 "description": "Air quality index prediction based on historical pollution patterns",
                 "parameters": {"current_aqi": "int", "days": "int (1-14)"},
+                "trained": False,
+                "status": "simulation",
             },
         ]
     }

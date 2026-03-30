@@ -1,6 +1,7 @@
 ﻿import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import useWebSocket from '@/hooks/useWebSocket';
+import { useAuth } from '@/contexts/AuthContext';
 
 const LocationContext = createContext();
 
@@ -15,6 +16,7 @@ export const useLocation = () => {
 const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
 export const LocationProvider = ({ children }) => {
+  const { user, token } = useAuth();
   const [location, setLocation] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -87,6 +89,45 @@ export const LocationProvider = ({ children }) => {
       fetchNearbyAlerts(location.latitude, location.longitude);
     }
   }, [location]);
+
+  // Persist latest location + pincode into backend user profile so proximity alerts work for all logged-in accounts.
+  useEffect(() => {
+    if (!user?.id || !token || !location) return;
+
+    const gpsLat = location.latitude ?? location.lat;
+    const gpsLon = location.longitude ?? location.lon;
+    if (gpsLat == null || gpsLon == null) return;
+
+    const payload = {
+      gps_lat: Number(gpsLat),
+      gps_lon: Number(gpsLon),
+      gps_pincode: gpsPincode || location.gps_pincode || location.pin_code || undefined,
+      gps_city: location.city || undefined,
+      gps_state: location.state || undefined,
+      home_pincode: homePincode || undefined,
+    };
+
+    const signature = JSON.stringify(payload);
+    const syncKey = `profile_location_sync_${user.id}`;
+    if (localStorage.getItem(syncKey) === signature) return;
+
+    const sync = async () => {
+      try {
+        await axios.put(`${BACKEND}/api/profile/${user.id}`, payload, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10000,
+        });
+        localStorage.setItem(syncKey, signature);
+      } catch (e) {
+        console.warn('Profile location sync failed:', e?.message || e);
+      }
+    };
+
+    sync();
+  }, [user, token, location, gpsPincode, homePincode]);
 
   const detectLocation = async () => {
     setLoading(true);

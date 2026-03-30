@@ -3,7 +3,7 @@ import {
   ThumbsUp, MessageSquare, Share2, Bookmark, MapPin, 
   MoreVertical, Trash2, Edit2, Flag, ExternalLink,
   Play, Volume2, VolumeX, Maximize2, Heart, Image as ImageIcon,
-  MessageCircle, ShieldAlert
+  MessageCircle, ShieldAlert, CheckCircle2, RotateCcw, Hash
 } from 'lucide-react';
 import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -118,9 +118,17 @@ const CommunityPost = ({
     try {
       const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api';
       const res = await fetch(`${API_URL}/community/posts/${post.id}/resolve?resolved=${newResolved}&user_id=${encodeURIComponent(currentUserId || '')}`, { method: 'POST' });
-      if (!res.ok) setIsResolved(!newResolved); // revert on error
+      if (!res.ok) {
+        setIsResolved(!newResolved);
+        toast.error('Could not update status. Please try again.');
+      } else if (newResolved) {
+        toast.success('🎉 Marked as resolved! Thank you for updating the community.');
+      } else {
+        toast.info('Post re-opened — others can still help.');
+      }
     } catch (e) {
       setIsResolved(!newResolved);
+      toast.error('Network error. Please try again.');
     } finally {
       setResolving(false);
     }
@@ -192,10 +200,28 @@ const CommunityPost = ({
     general:   'border-l-4 border-l-blue-400',
   }[post.type] || 'border-l-4 border-l-blue-400';
 
+  const cardBorderClass = isResolved ? 'border-l-4 border-l-green-500' : typeBorderColor;
+
   return (
     <>
-      <Card className={cn('mb-3 overflow-hidden shadow-sm hover:shadow-md transition-shadow', typeBorderColor)}>
+      <Card className={cn('mb-3 overflow-hidden shadow-sm hover:shadow-md transition-shadow', cardBorderClass, isResolved && 'opacity-80 bg-green-50/30 dark:bg-green-950/10')}>
         <CardContent className="p-0">
+          {/* Resolved Banner */}
+          {isResolved && (
+            <div className="flex items-center gap-2 px-4 py-2 bg-green-100 dark:bg-green-900/30 border-b border-green-200 dark:border-green-800">
+              <CheckCircle2 className="w-4 h-4 text-green-600 dark:text-green-400 shrink-0" />
+              <span className="text-xs font-semibold text-green-700 dark:text-green-400">
+                {post.type === 'help' ? 'Help received — resolved' :
+                 post.type === 'offer' ? 'Offer fulfilled — resolved' :
+                 post.type === 'emergency' ? 'Situation resolved' : 'Resolved'}
+              </span>
+              {post.resolved_at && (
+                <span className="text-xs text-green-600/70 dark:text-green-500/70 ml-auto">
+                  {new Date(post.resolved_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                </span>
+              )}
+            </div>
+          )}
           {/* Post Header */}
           <div className="p-4 pb-3">
             <div className="flex justify-between items-start">
@@ -232,6 +258,15 @@ const CommunityPost = ({
                         <div className="flex items-center gap-1">
                           <MapPin className="w-3 h-3" />
                           {post.location}
+                        </div>
+                      </>
+                    )}
+                    {post.pincode && (
+                      <>
+                        <span>•</span>
+                        <div className="flex items-center gap-1">
+                          <Hash className="w-3 h-3" />
+                          {post.pincode}
                         </div>
                       </>
                     )}
@@ -524,13 +559,20 @@ const CommunityPost = ({
                 size="sm"
                 onClick={handleResolve}
                 disabled={resolving}
+                title={isResolved ? 'Mark this post as active again' : 'Mark this post as resolved'}
                 className={cn(
                   'gap-1.5 flex-1 text-xs h-9',
-                  isResolved ? 'text-green-600 hover:text-green-700' : 'text-gray-500 hover:text-green-600'
+                  isResolved
+                    ? 'text-green-700 bg-green-100/70 hover:bg-green-100 hover:text-green-800'
+                    : 'text-gray-500 hover:text-green-600'
                 )}
               >
-                <span className="w-3.5 h-3.5 flex items-center justify-center font-bold">{isResolved ? '✓' : '○'}</span>
-                <span>{isResolved ? 'Resolved' : 'Resolve'}</span>
+                {isResolved ? (
+                  <RotateCcw className="w-3.5 h-3.5" />
+                ) : (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                )}
+                <span>{isResolved ? 'Re-open' : 'Mark Resolved'}</span>
               </Button>
             )}
           </div>

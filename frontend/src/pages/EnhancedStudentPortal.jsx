@@ -22,6 +22,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import InteractiveQuiz from '@/components/student/InteractiveQuiz';
 import { toast } from 'sonner';
 
+const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+
 const EnhancedStudentPortal = () => {
   const [activeQuiz, setActiveQuiz] = useState(null);
   const [userProgress, setUserProgress] = useState({
@@ -130,7 +132,7 @@ const EnhancedStudentPortal = () => {
   const handleDownloadDataset = async (datasetId) => {
     try {
       toast.promise(
-        fetch(`http://localhost:8000/api/datasets/${datasetId}/download`).then(res => {
+        fetch(`${BACKEND}/api/datasets/${datasetId}/download`).then(res => {
           if (!res.ok) throw new Error('Download failed');
           return res.blob();
         }).then(blob => {

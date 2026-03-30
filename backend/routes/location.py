@@ -5,6 +5,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import logging
+import httpx
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -12,10 +14,10 @@ location_router = APIRouter(prefix="/api/location", tags=["Location"])
 
 
 class LocationUpdate(BaseModel):
-    lat: float = None
-    lon: float = None
-    latitude: float = None
-    longitude: float = None
+    lat: float | None = None
+    lon: float | None = None
+    latitude: float | None = None
+    longitude: float | None = None
     city: Optional[str] = None
     state: Optional[str] = None
     pin_code: Optional[str] = None
@@ -26,6 +28,10 @@ class LocationUpdate(BaseModel):
 class PincodeRequest(BaseModel):
     pincode: Optional[str] = None
     pin_code: Optional[str] = None
+
+
+class LocationSearchRequest(BaseModel):
+    query: str
 
 
 # State mapping by first 2 digits (fallback)
@@ -106,20 +112,59 @@ _STATE_MAP = {
 def _geocode_pincode_nominatim(pincode: str):
     """Try Nominatim for accurate PIN code geocoding."""
     try:
-        from geopy.geocoders import Nominatim
-        geolocator = Nominatim(user_agent="suraksha_setu_geocoder")
-        location = geolocator.geocode(
-            {"postalcode": pincode, "country": "India"},
-            timeout=5,
-        )
-        if location:
+        headers = {"User-Agent": "SurakshaSetuApp/1.0 (location-search)"}
+        with httpx.Client(timeout=6.0, headers=headers) as client:
+            resp = client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "postalcode": pincode,
+                    "country": "India",
+                    "format": "json",
+                    "limit": 1,
+                    "addressdetails": 1,
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json() or []
+
+        if payload:
+            row = payload[0]
             return {
-                "lat": location.latitude,
-                "lon": location.longitude,
-                "display_name": location.address or f"India (PIN: {pincode})",
+                "lat": float(row.get("lat")),
+                "lon": float(row.get("lon")),
+                "display_name": row.get("display_name") or f"India (PIN: {pincode})",
             }
     except Exception as e:
         logger.warning(f"Nominatim geocoding failed for {pincode}: {e}")
+    return None
+
+
+def _geocode_query_nominatim(query: str):
+    """Geocode a free-text location query in India."""
+    try:
+        headers = {"User-Agent": "SurakshaSetuApp/1.0 (location-search)"}
+        with httpx.Client(timeout=6.0, headers=headers) as client:
+            resp = client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": f"{query}, India",
+                    "format": "json",
+                    "limit": 1,
+                    "addressdetails": 1,
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json() or []
+
+        if payload:
+            row = payload[0]
+            return {
+                "lat": float(row.get("lat")),
+                "lon": float(row.get("lon")),
+                "display_name": row.get("display_name") or query,
+            }
+    except Exception as e:
+        logger.warning("Nominatim geocoding failed for '%s': %s", query, e)
     return None
 
 
@@ -134,6 +179,39 @@ async def get_current_location():
         "country": "India",
         "display_name": "New Delhi, Delhi, India",
     }
+
+
+@location_router.post("/search")
+async def search_location(data: LocationSearchRequest):
+    """Search a location using free text, pincode, or address and return coordinates."""
+    query = (data.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    # If this looks like a PIN code, reuse pincode resolution first.
+    if query.isdigit() and len(query) == 6:
+        pincode_result = await validate_pincode(PincodeRequest(pincode=query))
+        return {
+            "success": True,
+            "query": query,
+            "lat": pincode_result.get("lat"),
+            "lon": pincode_result.get("lon"),
+            "display_name": pincode_result.get("display_name") or f"PIN {query}",
+            "source": "pincode",
+        }
+
+    geocoded = _geocode_query_nominatim(query)
+    if geocoded:
+        return {
+            "success": True,
+            "query": query,
+            "lat": geocoded["lat"],
+            "lon": geocoded["lon"],
+            "display_name": geocoded["display_name"],
+            "source": "nominatim",
+        }
+
+    raise HTTPException(status_code=404, detail="Location not found")
 
 
 @location_router.post("/update")
@@ -255,20 +333,88 @@ async def reverse_geocode(lat: float, lon: float):
 
 @location_router.get("/nearby-alerts")
 async def get_nearby_alerts(lat: float = 28.6139, lon: float = 77.209, radius_km: float = 100):
-    """Get alerts near a location."""
+    """Get alerts near a location using optimized spatial filtering."""
     from database import AsyncSessionLocal, Alert
-    from sqlalchemy import select
+    from sqlalchemy import select, text, and_
+    from utils.spatial_query import haversine_distance, estimate_lat_lon_tolerance
+    import uuid
 
     try:
         async with AsyncSessionLocal() as db:
-            query = (
-                select(Alert)
-                .where(Alert.is_active == True, Alert.retracted == False)
-                .order_by(Alert.created_at.desc())
-                .limit(20)
-            )
+            # Step 1: DB-level bounding box pre-filter (FAST)
+            lat_tol, lon_tol = estimate_lat_lon_tolerance(radius_km)
+            
+            query = select(Alert).where(
+                and_(
+                    Alert.is_active == True,  # noqa: E712
+                    Alert.retracted == False,  # noqa: E712
+                )
+            ).order_by(Alert.created_at.desc()).limit(100)
+            
             result = await db.execute(query)
-            alerts = result.scalars().all()
+            all_alerts = result.scalars().all()
+
+            # Step 2: Python-level Haversine filtering on results
+            nearby_alerts = []
+            for alert in all_alerts:
+                loc = alert.location or {}
+                alert_lat = loc.get('lat')
+                alert_lon = loc.get('lon')
+                if alert_lat and alert_lon:
+                    distance = haversine_distance(lat, lon, alert_lat, alert_lon)
+                    if distance <= radius_km:
+                        nearby_alerts.append(alert)
+
+            # Step 3: Persist nearby snapshot for dataset training (optional)
+            from database import NearbyDisasterDataset
+            query_lat = round(float(lat), 4)
+            query_lon = round(float(lon), 4)
+            query_radius = round(float(radius_km), 2)
+
+            for a in nearby_alerts[:20]:  # Limit to top 20 for dataset storage
+                existing = await db.execute(
+                    select(NearbyDisasterDataset).where(
+                        NearbyDisasterDataset.alert_id == a.id,
+                        NearbyDisasterDataset.query_lat == query_lat,
+                        NearbyDisasterDataset.query_lon == query_lon,
+                        NearbyDisasterDataset.radius_km == query_radius,
+                    )
+                )
+                row = existing.scalar_one_or_none()
+
+                payload = {
+                    "alert_type": a.alert_type,
+                    "severity": a.severity,
+                    "title": a.title,
+                    "location": (a.location or {}).get("city") if isinstance(a.location, dict) else str(a.location),
+                    "source": a.source,
+                    "alert_created_at": str(a.created_at) if a.created_at else None,
+                    "raw_payload": {
+                        "id": a.id,
+                        "type": a.alert_type,
+                        "severity": a.severity,
+                        "title": a.title,
+                        "description": a.description,
+                        "location": a.location,
+                        "source": a.source,
+                        "created_at": str(a.created_at),
+                    },
+                }
+
+                if row:
+                    for key, value in payload.items():
+                        setattr(row, key, value)
+                else:
+                    db.add(NearbyDisasterDataset(
+                        id=str(uuid.uuid4()),
+                        query_lat=query_lat,
+                        query_lon=query_lon,
+                        radius_km=query_radius,
+                        alert_id=a.id,
+                        **payload,
+                    ))
+
+            await db.commit()
 
             return {
                 "alerts": [
@@ -282,10 +428,11 @@ async def get_nearby_alerts(lat: float = 28.6139, lon: float = 77.209, radius_km
                         "source": a.source,
                         "created_at": str(a.created_at),
                     }
-                    for a in alerts
+                    for a in nearby_alerts
                 ],
                 "radius_km": radius_km,
+                "count": len(nearby_alerts),
             }
     except Exception as e:
         logger.error(f"Error fetching nearby alerts: {e}")
-        return {"alerts": [], "radius_km": radius_km}
+        return {"alerts": [], "radius_km": radius_km, "count": 0}

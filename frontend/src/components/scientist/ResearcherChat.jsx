@@ -104,6 +104,9 @@ export default function ResearcherChat() {
                         <p>Scientific analysis engine</p>
                     </div>
                 </div>
+                <div className="researcher-chat__header-chip">
+                    {ragEnabled ? 'RAG ON' : 'RAG OFF'}
+                </div>
             </div>
 
             {/* Controls */}
@@ -171,6 +174,10 @@ export default function ResearcherChat() {
                                 >
                                     <Download size={12} /> Export CSV
                                 </a>
+                            )}
+
+                            {msg.role === 'bot' && msg.cached && (
+                                <div className="researcher-chat__cache-hint">Response from cache</div>
                             )}
 
                             {/* Confidence + Token cost hidden per user request */}
