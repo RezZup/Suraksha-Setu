@@ -129,9 +129,20 @@ def _geocode_pincode_nominatim(pincode: str):
 
         if payload:
             row = payload[0]
+            addr = row.get("address", {})
+            city = (
+                addr.get("city")
+                or addr.get("town")
+                or addr.get("village")
+                or addr.get("county")
+                or ""
+            )
+            state = addr.get("state", "")
             return {
                 "lat": float(row.get("lat")),
                 "lon": float(row.get("lon")),
+                "city": city,
+                "state": state,
                 "display_name": row.get("display_name") or f"India (PIN: {pincode})",
             }
     except Exception as e:
@@ -216,19 +227,25 @@ async def search_location(data: LocationSearchRequest):
 
 @location_router.post("/update")
 async def update_location(data: LocationUpdate):
-    """Update user's location."""
+    """Update user's location and return city/state."""
     lat = data.lat or data.latitude
     lon = data.lon or data.longitude
+    city = data.city or "Unknown"
+    state = data.state or "Unknown"
 
-    # If only pin_code provided, geocode it
+    # If only pin_code provided, geocode it to get lat/lon and city/state
     if not lat and data.pin_code:
         result = _geocode_pincode_nominatim(data.pin_code)
         if result:
             lat, lon = result["lat"], result["lon"]
+            city = result.get("city", "Unknown") or "Unknown"
+            state = result.get("state", "Unknown") or "Unknown"
         else:
+            # Fallback: use state code mapping
             prefix = data.pin_code[:2]
             if prefix in _STATE_MAP:
-                _, lat, lon = _STATE_MAP[prefix]
+                state, lat, lon = _STATE_MAP[prefix]
+                city = state  # Use state as city if we don't have detailed info
             else:
                 lat, lon = 20.5937, 78.9629
 
@@ -239,8 +256,8 @@ async def update_location(data: LocationUpdate):
             "longitude": lon,
             "lat": lat,
             "lon": lon,
-            "city": data.city or "Unknown",
-            "state": data.state or "Unknown",
+            "city": city,
+            "state": state,
             "pin_code": data.pin_code,
         },
     }
