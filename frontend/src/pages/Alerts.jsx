@@ -21,10 +21,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from '@/hooks/use-toast';
 import { cachedFetchJson } from '@/utils/requestCache';
+import { useAuth } from '@/contexts/AuthContext';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
-const AlertCard = ({ alert }) => {
+const AlertCard = ({ alert, onFeedback }) => {
   const getSeverityColor = (severity) => {
     switch (severity) {
       case 'critical': return 'border-destructive bg-destructive/5';
@@ -77,6 +78,22 @@ const AlertCard = ({ alert }) => {
               <span>{alert.time}</span>
               <span className="font-medium text-foreground">Impact: {alert.impact}</span>
             </div>
+            <div className="flex flex-wrap items-center gap-2 mt-3">
+              {typeof alert.trustScore === 'number' ? (
+                <Badge variant="outline" className="text-xs">
+                  Trust Score: {Math.round(alert.trustScore)}%
+                </Badge>
+              ) : null}
+              <Button size="sm" variant="outline" onClick={() => onFeedback(alert.id, 'accurate')}>
+                Accurate
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => onFeedback(alert.id, 'false_alarm')}>
+                False Alarm
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => onFeedback(alert.id, 'outdated')}>
+                Outdated
+              </Button>
+            </div>
           </div>
         </div>
         <div className="flex flex-col gap-2">
@@ -93,6 +110,7 @@ const AlertCard = ({ alert }) => {
 };
 
 const Alerts = () => {
+  const { user } = useAuth();
   const [alerts, setAlerts] = useState([]);
   const [filteredAlerts, setFilteredAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -105,6 +123,49 @@ const Alerts = () => {
   const [selectedRegion, setSelectedRegion] = useState('all');
   
   const { toast } = useToast();
+
+  const submitFeedback = async (alertId, verdict) => {
+    try {
+      const token = localStorage.getItem('auth_token') || '';
+      const res = await fetch(`${API_URL}/api/alerts/${alertId}/feedback`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          verdict,
+          user_id: user?.id,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || 'Failed to submit feedback');
+
+      setAlerts((prev) =>
+        prev.map((item) =>
+          item.id === alertId
+            ? {
+                ...item,
+                trustScore: data?.summary?.trust_score,
+                feedbackCounts: data?.summary?.counts,
+                feedbackTotal: data?.summary?.total,
+              }
+            : item
+        )
+      );
+
+      toast({
+        title: 'Feedback submitted',
+        description: 'Thanks for helping improve alert quality.',
+      });
+    } catch (err) {
+      toast({
+        title: 'Could not submit feedback',
+        description: err?.message || 'Please try again in a moment.',
+        variant: 'destructive',
+      });
+    }
+  };
 
   // Fetch alerts data
   useEffect(() => {
@@ -129,13 +190,22 @@ const Alerts = () => {
         // Format data for display
         const formattedAlerts = (data.alerts || []).map(alert => ({
           id: alert.id || Math.random(),
-          type: alert.report_type?.toLowerCase() || 'info',
+          type: (alert.report_type || alert.type || alert.alert_type || 'info').toLowerCase(),
           severity: alert.severity?.toLowerCase() || 'info',
           title: alert.title || alert.alert_type || 'Alert',
           message: alert.description || alert.message || '',
-          location: alert.location || 'Unknown Location',
-          time: alert.timestamp ? new Date(alert.timestamp).toLocaleString() : 'Recently',
-          impact: alert.affected_population ? `Affecting ${alert.affected_population} people` : 'To be determined'
+          location: typeof alert.location === 'string'
+            ? alert.location
+            : alert.location_data?.city || alert.location_data?.name || alert.location_data?.state || 'Unknown Location',
+          time: (alert.timestamp || alert.created_at)
+            ? new Date(alert.timestamp || alert.created_at).toLocaleString()
+            : 'Recently',
+          impact: alert.affected_population ? `Affecting ${alert.affected_population} people` : 'To be determined',
+          trustScore: typeof alert.trust_score === 'number'
+            ? alert.trust_score
+            : (typeof alert.feedback?.trust_score === 'number' ? alert.feedback.trust_score : null),
+          feedbackCounts: alert.feedback?.counts || null,
+          feedbackTotal: alert.feedback?.total || 0,
         }));
         
         setAlerts(formattedAlerts);
@@ -302,7 +372,7 @@ const Alerts = () => {
                 Showing {filteredAlerts.length} of {alerts.length} alerts
               </p>
               {filteredAlerts.map(alert => (
-                <AlertCard key={alert.id} alert={alert} />
+                <AlertCard key={alert.id} alert={alert} onFeedback={submitFeedback} />
               ))}
             </div>
           )}

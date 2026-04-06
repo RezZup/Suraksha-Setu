@@ -138,14 +138,19 @@ class MOSDACPoller:
 
     async def store_metadata(self, records: List[Dict]) -> int:
         """Store polled metadata in DB (Layer 1 persistence)."""
+        from sqlalchemy import select
         from database import AsyncSessionLocal, MOSDACMetadata
 
         stored = 0
         try:
             async with AsyncSessionLocal() as db:
                 for rec in records:
-                    existing = await db.get(MOSDACMetadata, rec["product_id"])
-                    if existing:
+                    existing = await db.execute(
+                        select(MOSDACMetadata.id)
+                        .where(MOSDACMetadata.product_id == rec["product_id"])
+                        .limit(1)
+                    )
+                    if existing.scalar_one_or_none():
                         continue
 
                     meta = MOSDACMetadata(

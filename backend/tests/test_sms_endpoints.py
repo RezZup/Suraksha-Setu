@@ -1,29 +1,48 @@
-import httpx, json
+import os
+import uuid
 
-client = httpx.Client(base_url='http://localhost:8000', timeout=10)
+import httpx
+import pytest
 
-# 1. Register phone
-r = client.post('/api/users/register-phone', json={
-    'uid': 'test123', 'phone': '+919876543210', 'email': 'test@test.com', 'name': 'Test User'
-})
-print(f'Register phone: {r.status_code} → {r.json()}')
 
-# 2. Phone count
-r = client.get('/api/users/phone-count')
-print(f'Phone count: {r.status_code} → {r.json()}')
+BASE_URL = os.getenv("BACKEND_BASE_URL", "http://localhost:8000")
 
-# 3. SMS status
-r = client.get('/api/sms/status')
-print(f'SMS status: {r.status_code} → {r.json()}')
 
-# 4. SMS audit log
-r = client.get('/api/sms/audit-log')
-print(f'SMS audit: {r.status_code} → {r.json()}')
+def _backend_available() -> bool:
+    try:
+        with httpx.Client(base_url=BASE_URL, timeout=5) as client:
+            r = client.get("/")
+            return r.status_code < 500
+    except Exception:
+        return False
 
-# 5. Safety status
-r = client.get('/admin/safety/status')
-print(f'Safety: {r.status_code} → {r.json()}')
 
-# 6. Pending alerts
-r = client.get('/admin/alerts/pending')
-print(f'Pending: {r.status_code} → {r.json()}')
+@pytest.mark.skipif(not _backend_available(), reason=f"Backend is not reachable at {BASE_URL}")
+def test_sms_endpoints_smoke():
+    uid = f"test_{uuid.uuid4().hex[:8]}"
+    with httpx.Client(base_url=BASE_URL, timeout=15) as client:
+        r = client.post(
+            "/api/users/register-phone",
+            json={
+                "uid": uid,
+                "phone": "+919876543210",
+                "email": f"{uid}@test.com",
+                "name": "Test User",
+            },
+        )
+        assert r.status_code in (200, 201)
+
+        r = client.get("/api/users/phone-count")
+        assert r.status_code == 200
+
+        r = client.get("/api/sms/status")
+        assert r.status_code == 200
+
+        r = client.get("/api/sms/audit-log")
+        assert r.status_code == 200
+
+        r = client.get("/admin/safety/status")
+        assert r.status_code == 200
+
+        r = client.get("/admin/alerts/pending")
+        assert r.status_code == 200

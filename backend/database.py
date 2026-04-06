@@ -3,8 +3,7 @@ PostgreSQL Database Configuration and Models
 """
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
-from sqlalchemy import String, DateTime, JSON, Boolean, Integer, Float, Text, ForeignKey, TypeDecorator
-from geoalchemy2 import Geography
+from sqlalchemy import String, DateTime, JSON, Boolean, Integer, Float, Text, ForeignKey, TypeDecorator, UniqueConstraint
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import os
@@ -59,13 +58,10 @@ if DATABASE_URL:
 else:
     raise ValueError("DATABASE_URL not set in environment variables")
 
-# Define SafeGeography based on database type
-if DATABASE_URL and DATABASE_URL.startswith('sqlite'):
-    SafeGeography = JSON
-else:
-    class SafeGeography(Geography):
-        def __init__(self, **kwargs):
-            super().__init__(geometry_type='POINT', srid=4326, **kwargs)
+# Define SafeGeography as JSON for broad compatibility across SQLite/Supabase schemas.
+# Existing deployments store geom columns as JSON, so using Geography would trigger
+# ST_AsBinary(json) errors on SELECT.
+SafeGeography = JSON
 
 # Create async session factory
 AsyncSessionLocal = async_sessionmaker(
@@ -139,6 +135,22 @@ class Alert(Base):
     retracted: Mapped[bool] = mapped_column(Boolean, default=False)
     retraction_reason: Mapped[Optional[str]] = mapped_column(Text)
     retracted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class AlertFeedback(Base):
+    """User trust/quality feedback for generated alerts."""
+    __tablename__ = 'alert_feedback'
+    __table_args__ = (
+        UniqueConstraint('alert_id', 'user_id', name='uq_alert_feedback_user'),
+    )
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    alert_id: Mapped[str] = mapped_column(String(255), ForeignKey('alerts.id', ondelete='CASCADE'), index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    verdict: Mapped[str] = mapped_column(String(30), index=True)  # accurate, false_alarm, outdated, duplicate
+    confidence: Mapped[Optional[int]] = mapped_column(Integer)
+    note: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class CommunityReport(Base):

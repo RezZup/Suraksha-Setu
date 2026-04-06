@@ -1,7 +1,7 @@
 """
 Community API Routes — fully database-backed with persistent storage
 """
-from fastapi import APIRouter, HTTPException, Query, Depends, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Query, Depends, UploadFile, File, Form, Request
 from pydantic import BaseModel
 from typing import Optional, List
 from sqlalchemy import select, func, or_, and_
@@ -12,9 +12,10 @@ import os
 import pathlib
 from datetime import datetime, timezone
 
-from database import get_db, CommunityPost, Comment, DirectMessage, Notification, UserReport
+from database import get_db, CommunityPost, Comment, DirectMessage, Notification, UserReport, User
 from firebase_auth import verify_firebase_token, get_optional_user
 from sms_service import sms_service, phone_registry
+from utils.abuse_guard import enforce_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +152,10 @@ async def get_posts(
         clean = pincode.strip()
         posts = [
             p for p in posts
-            if clean in (p.location or {}).get("name", "")
+            if (
+                clean in str((p.location or {}).get("name", ""))
+                or clean == str((p.location or {}).get("pincode", ""))
+            )
         ]
 
     posts = posts[:limit]
@@ -237,8 +241,21 @@ async def upload_community_image(
 
 
 @community_router.post("/posts")
-async def create_post(request: CreatePostRequest, db: AsyncSession = Depends(get_db), _user=Depends(get_optional_user)):
+async def create_post(
+    http_request: Request,
+    request: CreatePostRequest,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_optional_user),
+):
     """Create a community post in the database."""
+    await enforce_rate_limit(
+        http_request,
+        bucket="community_post_create",
+        limit=20,
+        window_seconds=60,
+        key_hint=(_user or {}).get("uid") if _user else request.user_id,
+    )
+
     post_id = str(uuid.uuid4())
 
     # If the request carries a valid Firebase token, canonicalize the user_id
@@ -246,6 +263,22 @@ async def create_post(request: CreatePostRequest, db: AsyncSession = Depends(get
     effective_user_id = request.user_id or "anonymous"
     if _user:
         effective_user_id = _user["uid"]
+
+    # Supabase enforces FK on community_posts.user_id. Ensure the user exists.
+    existing_user = await db.get(User, effective_user_id)
+    if not existing_user:
+        stable_suffix = uuid.uuid5(uuid.NAMESPACE_URL, effective_user_id).hex[:12]
+        db.add(User(
+            id=effective_user_id,
+            email=f"guest_{stable_suffix}@guest.local",
+            username=f"guest_{stable_suffix}",
+            password_hash="external-auth",
+            full_name=request.author or "Anonymous",
+            user_type="citizen",
+            location=None,
+            preferences={},
+        ))
+        await db.flush()
 
     location_meta = {
         "name": request.location or "",
@@ -430,11 +463,20 @@ async def toggle_resolve_post(
 
 @community_router.post("/posts/{post_id}/comments")
 async def add_comment(
+    http_request: Request,
     post_id: str,
     request: CreateCommentRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Add a comment (or reply) to a post. Persisted in database."""
+    await enforce_rate_limit(
+        http_request,
+        bucket="community_comment_create",
+        limit=40,
+        window_seconds=60,
+        key_hint=request.author_id or request.author,
+    )
+
     post = await db.get(CommunityPost, post_id)
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")

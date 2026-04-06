@@ -11,7 +11,7 @@ POST /api/profile/{user_id}/test-email  — send test email to verify SMTP
 import uuid
 import os
 import logging
-from typing import Optional
+from typing import Optional, Any
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
@@ -70,10 +70,28 @@ class TelegramLinkChatIdRequest(BaseModel):
     firebase_token: str  # Firebase token for user verification
 
 
+class SavedLocationCreate(BaseModel):
+    name: str
+    pincode: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    is_default: bool = False
+
+
+class SavedLocationUpdate(BaseModel):
+    name: Optional[str] = None
+    pincode: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    is_default: Optional[bool] = None
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _profile_dict(user: User) -> dict:
     loc = user.location or {}
+    prefs = user.preferences or {}
+    saved_locations = prefs.get("saved_locations", []) if isinstance(prefs, dict) else []
     return {
         "id": user.id,
         "email": user.email,
@@ -91,6 +109,7 @@ def _profile_dict(user: User) -> dict:
         "is_active": user.is_active,
         "location": loc,
         "preferences": user.preferences,
+        "saved_locations": saved_locations,
         "created_at": str(user.created_at) if user.created_at else None,
         # Pincode fields surfaced for frontend convenience
         "home_pincode": loc.get("home_pincode", ""),
@@ -98,6 +117,91 @@ def _profile_dict(user: User) -> dict:
         "gps_city": loc.get("city", ""),
         "gps_state": loc.get("state", ""),
     }
+
+
+def _role_from_token(token: dict) -> str:
+    claims = token.get("firebase_claims") or {}
+    return (
+        claims.get("role")
+        or claims.get("user_type")
+        or token.get("role")
+        or ""
+    ).strip().lower()
+
+
+async def _ensure_profile_access(user_id: str, token: dict, db: AsyncSession) -> None:
+    token_uid = token.get("uid", "")
+    token_role = _role_from_token(token)
+    if token_uid == user_id or token_role in ("admin", "developer"):
+        return
+
+    requester = await db.get(User, token_uid) if token_uid else None
+    requester_role = (requester.user_type or "").strip().lower() if requester else ""
+    if requester and requester.is_active and requester_role in ("admin", "developer"):
+        return
+
+    raise HTTPException(status_code=403, detail="Cannot edit another user's profile")
+
+
+def _normalize_saved_locations(raw: Any) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+
+    cleaned: list[dict] = []
+    for item in raw[:10]:
+        if not isinstance(item, dict):
+            continue
+
+        name = (item.get("name") or "").strip()[:80]
+        if not name:
+            continue
+
+        pincode = str(item.get("pincode") or "").strip()
+        if pincode and (not pincode.isdigit() or len(pincode) != 6):
+            pincode = ""
+
+        lat = item.get("lat")
+        lon = item.get("lon")
+        try:
+            lat = float(lat) if lat is not None else None
+        except (TypeError, ValueError):
+            lat = None
+        try:
+            lon = float(lon) if lon is not None else None
+        except (TypeError, ValueError):
+            lon = None
+
+        cleaned.append(
+            {
+                "id": str(item.get("id") or uuid.uuid4()),
+                "name": name,
+                "pincode": pincode,
+                "lat": lat,
+                "lon": lon,
+                "is_default": bool(item.get("is_default", False)),
+            }
+        )
+
+    default_found = False
+    for loc in cleaned:
+        if loc["is_default"] and not default_found:
+            default_found = True
+        else:
+            loc["is_default"] = False
+
+    if cleaned and not default_found:
+        cleaned[0]["is_default"] = True
+
+    return cleaned
+
+
+def _validate_pincode_or_empty(raw: Optional[str]) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if value.isdigit() and len(value) == 6:
+        return value
+    raise HTTPException(status_code=422, detail="Pincode must be a 6-digit number")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -129,6 +233,7 @@ async def get_profile(user_id: str, db: AsyncSession = Depends(get_db)):
                 "is_active": True,
                 "location": None,
                 "preferences": None,
+                "saved_locations": [],
                 "created_at": None,
             },
         }
@@ -143,11 +248,7 @@ async def update_profile(
     _token: dict = Depends(verify_firebase_token),
 ):
     """Update profile fields. Upserts user row if not yet in DB. Requires auth."""
-    # Only allow editing own profile (unless admin / developer)
-    token_uid = _token.get("uid", "")
-    token_role = _token.get("role", "citizen")
-    if token_uid != user_id and token_role not in ("admin", "developer"):
-        raise HTTPException(status_code=403, detail="Cannot edit another user's profile")
+    await _ensure_profile_access(user_id, _token, db)
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -194,7 +295,10 @@ async def update_profile(
     if body.notification_channels is not None:
         user.notification_channels = body.notification_channels
     if body.preferences is not None:
-        user.preferences = {**(user.preferences or {}), **body.preferences}
+        merged = {**(user.preferences or {}), **body.preferences}
+        if "saved_locations" in merged:
+            merged["saved_locations"] = _normalize_saved_locations(merged.get("saved_locations"))
+        user.preferences = merged
     if body.avatar_url is not None:
         user.avatar_url = body.avatar_url
 
@@ -226,6 +330,149 @@ async def update_profile(
     await db.commit()
     await db.refresh(user)
     return {"success": True, "profile": _profile_dict(user)}
+
+
+@profile_router.get("/{user_id}/saved-locations")
+async def get_saved_locations(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    _token: dict = Depends(verify_firebase_token),
+):
+    """List saved locations for a user profile."""
+    await _ensure_profile_access(user_id, _token, db)
+
+    user = await db.get(User, user_id)
+    if not user:
+        return {"success": True, "saved_locations": []}
+
+    prefs = dict(user.preferences or {})
+    saved_locations = _normalize_saved_locations(prefs.get("saved_locations"))
+    return {"success": True, "saved_locations": saved_locations}
+
+
+@profile_router.post("/{user_id}/saved-locations")
+async def add_saved_location(
+    user_id: str,
+    body: SavedLocationCreate,
+    db: AsyncSession = Depends(get_db),
+    _token: dict = Depends(verify_firebase_token),
+):
+    """Add a saved location for quick alert targeting."""
+    await _ensure_profile_access(user_id, _token, db)
+
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    name = body.name.strip()[:80]
+    if not name:
+        raise HTTPException(status_code=422, detail="Location name is required")
+
+    prefs = dict(user.preferences or {})
+    saved_locations = _normalize_saved_locations(prefs.get("saved_locations"))
+    if len(saved_locations) >= 10:
+        raise HTTPException(status_code=400, detail="You can save up to 10 locations")
+
+    new_location = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "pincode": _validate_pincode_or_empty(body.pincode),
+        "lat": body.lat,
+        "lon": body.lon,
+        "is_default": bool(body.is_default),
+    }
+
+    if new_location["is_default"]:
+        for loc in saved_locations:
+            loc["is_default"] = False
+    elif not saved_locations:
+        new_location["is_default"] = True
+
+    saved_locations.append(new_location)
+    prefs["saved_locations"] = saved_locations
+    user.preferences = prefs
+
+    await db.commit()
+    return {"success": True, "saved_location": new_location, "saved_locations": saved_locations}
+
+
+@profile_router.put("/{user_id}/saved-locations/{location_id}")
+async def update_saved_location(
+    user_id: str,
+    location_id: str,
+    body: SavedLocationUpdate,
+    db: AsyncSession = Depends(get_db),
+    _token: dict = Depends(verify_firebase_token),
+):
+    """Update a saved location entry."""
+    await _ensure_profile_access(user_id, _token, db)
+
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    prefs = dict(user.preferences or {})
+    saved_locations = _normalize_saved_locations(prefs.get("saved_locations"))
+
+    target = next((loc for loc in saved_locations if loc.get("id") == location_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Saved location not found")
+
+    if body.name is not None:
+        name = body.name.strip()[:80]
+        if not name:
+            raise HTTPException(status_code=422, detail="Location name is required")
+        target["name"] = name
+    if body.pincode is not None:
+        target["pincode"] = _validate_pincode_or_empty(body.pincode)
+    if body.lat is not None:
+        target["lat"] = body.lat
+    if body.lon is not None:
+        target["lon"] = body.lon
+
+    if body.is_default is True:
+        for loc in saved_locations:
+            loc["is_default"] = loc.get("id") == location_id
+    elif body.is_default is False and target.get("is_default"):
+        target["is_default"] = False
+        if saved_locations:
+            saved_locations[0]["is_default"] = True
+
+    prefs["saved_locations"] = saved_locations
+    user.preferences = prefs
+
+    await db.commit()
+    return {"success": True, "saved_locations": saved_locations}
+
+
+@profile_router.delete("/{user_id}/saved-locations/{location_id}")
+async def delete_saved_location(
+    user_id: str,
+    location_id: str,
+    db: AsyncSession = Depends(get_db),
+    _token: dict = Depends(verify_firebase_token),
+):
+    """Delete a saved location from user preferences."""
+    await _ensure_profile_access(user_id, _token, db)
+
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    prefs = dict(user.preferences or {})
+    saved_locations = _normalize_saved_locations(prefs.get("saved_locations"))
+    remaining = [loc for loc in saved_locations if loc.get("id") != location_id]
+    if len(remaining) == len(saved_locations):
+        raise HTTPException(status_code=404, detail="Saved location not found")
+
+    if remaining and not any(loc.get("is_default") for loc in remaining):
+        remaining[0]["is_default"] = True
+
+    prefs["saved_locations"] = remaining
+    user.preferences = prefs
+
+    await db.commit()
+    return {"success": True, "saved_locations": remaining}
 
 
 @profile_router.post("/{user_id}/avatar")

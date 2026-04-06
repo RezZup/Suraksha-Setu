@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import os
 import io
@@ -19,13 +20,16 @@ import json
 import base64
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 # Core modules
-from database import init_db, close_db, get_db, AsyncSessionLocal, AILog, Alert
+from database import init_db, close_db, get_db, AsyncSessionLocal, AILog, Alert, AlertFeedback, ChatMessage, User
 from notifications import ws_manager, push_manager
 from risk_engine import RiskEngine
 from playbook import playbook_engine
 from utils.redis_client import redis_client
+from utils.abuse_guard import enforce_rate_limit
+from firebase_auth import verify_firebase_token, get_optional_user
 
 # AI modules
 from ai.orchestrator import orchestrator
@@ -39,7 +43,6 @@ from ingest.manager import IngestionManager
 
 # Rate limiting
 from fastapi_limiter import FastAPILimiter
-from fastapi_limiter.depends import RateLimiter
 
 # Geo utility
 from geopy.geocoders import Nominatim
@@ -50,6 +53,132 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 REDIS_TOKEN_KEY = "openai:total_tokens_used"
+
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _parse_training_locations() -> list:
+    """
+    Parse DATASET_TRAINING_LOCATIONS in format:
+      City Name:lat:lon,Another City:lat:lon
+    """
+    defaults = [
+        ("New Delhi", 28.6139, 77.2090),
+        ("Mumbai", 19.0760, 72.8777),
+        ("Kolkata", 22.5726, 88.3639),
+        ("Chennai", 13.0827, 80.2707),
+        ("Bengaluru", 12.9716, 77.5946),
+    ]
+    raw = os.getenv("DATASET_TRAINING_LOCATIONS", "").strip()
+    if not raw:
+        return defaults
+
+    parsed = []
+    for item in raw.split(","):
+        parts = [p.strip() for p in item.split(":")]
+        if len(parts) != 3:
+            continue
+        city, lat_s, lon_s = parts
+        try:
+            parsed.append((city, float(lat_s), float(lon_s)))
+        except ValueError:
+            continue
+
+    return parsed or defaults
+
+
+async def _run_periodic_alert_ingestion():
+    """Run deterministic alert ingestion on a recurring interval."""
+    if not _env_flag("ENABLE_BACKGROUND_ALERT_INGESTION", True):
+        logger.info("Background alert ingestion is disabled")
+        return
+
+    interval = max(300, int(os.getenv("ALERT_INGEST_INTERVAL_SECONDS", "900")))
+    startup_delay = max(5, int(os.getenv("ALERT_INGEST_STARTUP_DELAY_SECONDS", "15")))
+    await asyncio.sleep(startup_delay)
+
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                await IngestionManager.run_ingest_cycle(db)
+            logger.info("Background alert ingestion cycle completed")
+        except asyncio.CancelledError:
+            logger.info("Background alert ingestion task stopped")
+            raise
+        except Exception as e:
+            logger.warning("Background alert ingestion failed: %s", e)
+
+        await asyncio.sleep(interval)
+
+
+async def _run_periodic_dataset_collection():
+    """Continuously collect weather/AQI/disaster records for training datasets."""
+    if not _env_flag("ENABLE_BACKGROUND_DATASET_COLLECTION", True):
+        logger.info("Background dataset collection is disabled")
+        return
+
+    interval = max(600, int(os.getenv("DATASET_INGEST_INTERVAL_SECONDS", "1800")))
+    startup_delay = max(10, int(os.getenv("DATASET_INGEST_STARTUP_DELAY_SECONDS", "30")))
+    locations = _parse_training_locations()
+    await asyncio.sleep(startup_delay)
+
+    while True:
+        try:
+            from routes.weather import _fetch_weather, _fetch_aqi
+            from routes.disasters import (
+                _fetch_usgs_earthquakes,
+                _fetch_gdacs_disasters,
+                _persist_disaster_training_rows,
+            )
+
+            for city, lat, lon in locations:
+                weather_result, aqi_result = await asyncio.gather(
+                    _fetch_weather(lat, lon, city=city),
+                    _fetch_aqi(lat, lon, city=city),
+                    return_exceptions=True,
+                )
+                if isinstance(weather_result, Exception):
+                    logger.warning("Weather collection failed for %s: %s", city, weather_result)
+                if isinstance(aqi_result, Exception):
+                    logger.warning("AQI collection failed for %s: %s", city, aqi_result)
+
+            quake_data, gdacs_data = await asyncio.gather(
+                _fetch_usgs_earthquakes(),
+                _fetch_gdacs_disasters(),
+                return_exceptions=True,
+            )
+
+            disaster_rows = []
+            if isinstance(quake_data, list):
+                disaster_rows.extend(quake_data)
+            elif isinstance(quake_data, Exception):
+                logger.warning("USGS dataset collection failed: %s", quake_data)
+
+            if isinstance(gdacs_data, list):
+                disaster_rows.extend(gdacs_data)
+            elif isinstance(gdacs_data, Exception):
+                logger.warning("GDACS dataset collection failed: %s", gdacs_data)
+
+            if disaster_rows:
+                await _persist_disaster_training_rows(disaster_rows)
+
+            logger.info(
+                "Background dataset collection completed for %d cities (%d disaster rows)",
+                len(locations),
+                len(disaster_rows),
+            )
+        except asyncio.CancelledError:
+            logger.info("Background dataset collection task stopped")
+            raise
+        except Exception as e:
+            logger.warning("Background dataset collection failed: %s", e)
+
+        await asyncio.sleep(interval)
 
 # ──────────────────────────────────────────────────────────────
 #  LIFESPAN
@@ -76,8 +205,19 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("⚠️  Redis unavailable – caching/rate-limiting disabled")
 
+    background_tasks = [
+        asyncio.create_task(_run_periodic_alert_ingestion()),
+        asyncio.create_task(_run_periodic_dataset_collection()),
+    ]
+    app.state.background_tasks = background_tasks
+
     logger.info("✅ Suraksha Setu Backend Online")
     yield
+
+    for task in getattr(app.state, "background_tasks", []):
+        task.cancel()
+    if getattr(app.state, "background_tasks", None):
+        await asyncio.gather(*app.state.background_tasks, return_exceptions=True)
 
     await close_db()
     await redis_client.close()
@@ -137,6 +277,14 @@ async def ai_chat(request: Request):
     Supports: text queries, function calling, RAG (scientist)
     """
     data = await request.json()
+    await enforce_rate_limit(
+        request,
+        bucket="ai_chat",
+        limit=25,
+        window_seconds=60,
+        key_hint=str(data.get("user_id") or data.get("session_id") or ""),
+    )
+
     role = data.get("role", "citizen")
     message = data.get("message") or data.get("query", "")
     context = data.get("context", {})
@@ -162,6 +310,12 @@ async def ai_chat(request: Request):
 
     # Log to ai_logs
     usage = result.get("usage") or {}
+    response_text = result.get("message", "")
+    session_id = data.get("session_id") or context.get("session_id") or f"session_{uuid.uuid4().hex[:12]}"
+    client_user_id = data.get("user_id") or context.get("user_id")
+    language = (locale or context.get("language") or context.get("locale") or "en")[:10]
+    chat_entry_id = None
+    chat_timestamp = datetime.now(timezone.utc)
     try:
         async with AsyncSessionLocal() as db:
             log = AILog(
@@ -175,15 +329,44 @@ async def ai_chat(request: Request):
                 tool_calls=result.get("tool_calls_executed"),
             )
             db.add(log)
+
+            # Persist full chat exchange for historical retrieval and model training.
+            resolved_user_id = None
+            if client_user_id:
+                existing_user = await db.get(User, client_user_id)
+                if existing_user:
+                    resolved_user_id = client_user_id
+
+            chat_row = ChatMessage(
+                id=str(uuid.uuid4()),
+                user_id=resolved_user_id,
+                session_id=session_id,
+                message=message,
+                response=response_text,
+                language=language,
+                context={
+                    **context,
+                    "role": role,
+                    "client_user_id": client_user_id,
+                    "providers": result.get("providers_used", []),
+                },
+                timestamp=chat_timestamp,
+            )
+            db.add(chat_row)
+            chat_entry_id = chat_row.id
+
             await db.commit()
     except Exception as e:
         logger.warning(f"AI log write failed: {e}")
 
     # Reshape response for frontend widgets
     return {
+        "id": chat_entry_id,
+        "session_id": session_id,
+        "timestamp": chat_timestamp.isoformat(),
         "success": result.get("success", True),
-        "response": result.get("message", ""),
-        "answer": result.get("message", ""),
+        "response": response_text,
+        "answer": response_text,
         "role": role,
         "confidence": result.get("confidence", 0.65),
         "token_cost": result.get("token_cost", 0),
@@ -192,6 +375,37 @@ async def ai_chat(request: Request):
         "quiz": result.get("quiz"),
         "tool_calls_executed": result.get("tool_calls_executed", []),
         "usage": usage,
+    }
+
+
+@ai_router.get("/history")
+async def ai_history(session_id: str, limit: int = 100):
+    """Get persisted chat history for a client session."""
+    limit = min(max(limit, 1), 200)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.timestamp.asc())
+            .limit(limit)
+        )
+        rows = result.scalars().all()
+
+    return {
+        "session_id": session_id,
+        "messages": [
+            {
+                "id": r.id,
+                "user_id": r.user_id,
+                "session_id": r.session_id,
+                "message": r.message,
+                "response": r.response,
+                "language": r.language,
+                "context": r.context,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            }
+            for r in rows
+        ],
     }
 
 
@@ -397,27 +611,254 @@ async def ai_translate(request: Request):
 # ══════════════════════════════════════════════════════════════
 api_router = APIRouter(prefix="/api", tags=["Core"])
 
+ALERT_FEEDBACK_VERDICTS = {"accurate", "false_alarm", "outdated", "duplicate"}
+
+
+class AlertFeedbackRequest(BaseModel):
+    verdict: str
+    note: str | None = None
+    confidence: int | None = None
+    user_id: str | None = None
+
+
+def _build_feedback_summary(counts: dict[str, int]) -> dict:
+    normalized = {key: int(counts.get(key, 0)) for key in ALERT_FEEDBACK_VERDICTS}
+    total = sum(normalized.values())
+    trust_score = round((normalized.get("accurate", 0) / total) * 100, 1) if total else None
+    return {
+        "total": total,
+        "trust_score": trust_score,
+        "counts": normalized,
+    }
+
 
 @api_router.get("/alerts")
-async def get_alerts(lat: float = None, lon: float = None, db: AsyncSession = Depends(get_db)):
+async def get_alerts(
+    lat=None,
+    lon=None,
+    radius_km: float = 100.0,
+    severity=None,
+    report_type=None,
+    db: AsyncSession = Depends(get_db),
+):
     """Get active alerts with optional geo-filtering."""
     query = select(Alert).where(Alert.is_active == True, Alert.retracted == False)
-    result = await db.execute(query.order_by(Alert.created_at.desc()).limit(50))
+    if severity:
+        query = query.where(func.lower(Alert.severity) == severity.lower())
+    if report_type:
+        query = query.where(func.lower(Alert.alert_type) == report_type.lower())
+
+    result = await db.execute(query.order_by(Alert.created_at.desc()).limit(200))
     alerts = result.scalars().all()
-    return {
-        "alerts": [
+
+    feedback_by_alert: dict[str, dict[str, int]] = {}
+    if alerts:
+        alert_ids = [a.id for a in alerts]
+        feedback_result = await db.execute(
+            select(
+                AlertFeedback.alert_id,
+                AlertFeedback.verdict,
+                func.count(AlertFeedback.id),
+            )
+            .where(AlertFeedback.alert_id.in_(alert_ids))
+            .group_by(AlertFeedback.alert_id, AlertFeedback.verdict)
+        )
+        for alert_id, verdict, votes in feedback_result.all():
+            feedback_by_alert.setdefault(alert_id, {})[verdict] = int(votes or 0)
+
+    query_lat = float(lat) if lat is not None else None
+    query_lon = float(lon) if lon is not None else None
+    geo_filter = query_lat is not None and query_lon is not None
+    payload = []
+    for a in alerts:
+        location_data = a.location if isinstance(a.location, dict) else {}
+        if not location_data and isinstance(a.location, str):
+            location_data = {"name": a.location}
+
+        alert_lat = location_data.get("lat")
+        alert_lon = location_data.get("lon")
+        distance_km = None
+        if geo_filter and alert_lat is not None and alert_lon is not None:
+            try:
+                from utils.spatial_query import haversine_distance
+                lat_val = query_lat if query_lat is not None else 0.0
+                lon_val = query_lon if query_lon is not None else 0.0
+                distance_km = round(
+                    haversine_distance(lat_val, lon_val, float(alert_lat), float(alert_lon)),
+                    2,
+                )
+            except Exception:
+                distance_km = None
+
+        if geo_filter and distance_km is not None and distance_km > radius_km:
+            continue
+
+        location_label = (
+            location_data.get("city")
+            or location_data.get("name")
+            or location_data.get("state")
+            or (a.location if isinstance(a.location, str) else "Unknown Location")
+        )
+        created_at = a.created_at.isoformat() if a.created_at else None
+        feedback_summary = _build_feedback_summary(feedback_by_alert.get(a.id, {}))
+
+        payload.append(
             {
                 "id": a.id,
                 "type": a.alert_type,
+                "report_type": a.alert_type,
+                "alert_type": a.alert_type,
                 "severity": a.severity,
                 "title": a.title,
                 "description": a.description,
-                "location": a.location,
+                "message": a.description,
+                "location": location_label,
+                "location_data": location_data,
+                "coordinates": {
+                    "lat": alert_lat,
+                    "lon": alert_lon,
+                },
+                "distance_km": distance_km,
                 "source": a.source,
-                "created_at": str(a.created_at),
+                "created_at": created_at,
+                "timestamp": created_at,
+                "feedback": feedback_summary,
+                "trust_score": feedback_summary.get("trust_score"),
             }
-            for a in alerts
-        ]
+        )
+
+    return {
+        "alerts": payload,
+        "count": len(payload),
+    }
+
+
+@api_router.get("/alerts/{alert_id}/feedback")
+async def get_alert_feedback(alert_id: str, db: AsyncSession = Depends(get_db)):
+    """Return trust feedback summary and recent votes for an alert."""
+    alert = await db.get(Alert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    summary_rows = await db.execute(
+        select(AlertFeedback.verdict, func.count(AlertFeedback.id))
+        .where(AlertFeedback.alert_id == alert_id)
+        .group_by(AlertFeedback.verdict)
+    )
+    counts: dict[str, int] = {}
+    for verdict, votes in summary_rows.all():
+        counts[verdict] = int(votes or 0)
+
+    recent_rows = await db.execute(
+        select(AlertFeedback)
+        .where(AlertFeedback.alert_id == alert_id)
+        .order_by(AlertFeedback.created_at.desc())
+        .limit(20)
+    )
+    recent_feedback = recent_rows.scalars().all()
+
+    return {
+        "alert_id": alert_id,
+        **_build_feedback_summary(counts),
+        "recent_feedback": [
+            {
+                "id": row.id,
+                "user_id": row.user_id,
+                "verdict": row.verdict,
+                "confidence": row.confidence,
+                "note": row.note,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in recent_feedback
+        ],
+    }
+
+
+@api_router.post("/alerts/{alert_id}/feedback")
+async def submit_alert_feedback(
+    alert_id: str,
+    body: AlertFeedbackRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _user: dict | None = Depends(get_optional_user),
+):
+    """Store or update user feedback about alert quality and accuracy."""
+    await enforce_rate_limit(
+        request,
+        bucket="alert_feedback",
+        limit=12,
+        window_seconds=60,
+        key_hint=(_user or {}).get("uid") if _user else body.user_id,
+    )
+
+    alert = await db.get(Alert, alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    verdict = (body.verdict or "").strip().lower()
+    if verdict not in ALERT_FEEDBACK_VERDICTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"verdict must be one of: {sorted(ALERT_FEEDBACK_VERDICTS)}",
+        )
+
+    confidence = body.confidence
+    if confidence is not None:
+        confidence = max(0, min(100, int(confidence)))
+
+    note = (body.note or "").strip()
+    if len(note) > 500:
+        note = note[:500]
+
+    user_id = (_user or {}).get("uid") or (body.user_id or "").strip() or None
+    existing = None
+    if user_id:
+        existing_result = await db.execute(
+            select(AlertFeedback).where(
+                AlertFeedback.alert_id == alert_id,
+                AlertFeedback.user_id == user_id,
+            )
+        )
+        existing = existing_result.scalar_one_or_none()
+
+    if existing:
+        existing.verdict = verdict
+        existing.confidence = confidence
+        existing.note = note or None
+        feedback_row = existing
+    else:
+        feedback_row = AlertFeedback(
+            id=str(uuid.uuid4()),
+            alert_id=alert_id,
+            user_id=user_id,
+            verdict=verdict,
+            confidence=confidence,
+            note=note or None,
+        )
+        db.add(feedback_row)
+
+    await db.commit()
+
+    summary_rows = await db.execute(
+        select(AlertFeedback.verdict, func.count(AlertFeedback.id))
+        .where(AlertFeedback.alert_id == alert_id)
+        .group_by(AlertFeedback.verdict)
+    )
+    counts: dict[str, int] = {}
+    for row_verdict, votes in summary_rows.all():
+        counts[row_verdict] = int(votes or 0)
+
+    return {
+        "success": True,
+        "alert_id": alert_id,
+        "feedback": {
+            "id": feedback_row.id,
+            "user_id": feedback_row.user_id,
+            "verdict": feedback_row.verdict,
+            "confidence": feedback_row.confidence,
+            "note": feedback_row.note,
+        },
+        "summary": _build_feedback_summary(counts),
     }
 
 
@@ -522,11 +963,15 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                             "alerts": [
                                 {
                                     "id": str(a.id),
-                                    "type": a.event_type,
+                                    "type": a.alert_type,
                                     "severity": a.severity,
                                     "title": a.title,
                                     "description": a.description,
-                                    "coordinates": a.coordinates,
+                                    "location": a.location,
+                                    "coordinates": {
+                                        "lat": (a.location or {}).get("lat") if isinstance(a.location, dict) else None,
+                                        "lon": (a.location or {}).get("lon") if isinstance(a.location, dict) else None,
+                                    },
                                     "created_at": a.created_at.isoformat() if a.created_at else None,
                                 }
                                 for a in active_alerts
@@ -551,7 +996,43 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 # ══════════════════════════════════════════════════════════════
 #  ADMIN / AI USAGE MONITORING
 # ══════════════════════════════════════════════════════════════
-admin_router = APIRouter(prefix="/admin", tags=["Admin"])
+_ADMIN_ROLES = {"admin", "developer"}
+
+
+def _admin_role_from_token(token: dict) -> str:
+    claims = token.get("firebase_claims") or {}
+    return (
+        claims.get("role")
+        or claims.get("user_type")
+        or token.get("role")
+        or ""
+    ).strip().lower()
+
+
+async def require_admin_access(
+    token: dict = Depends(verify_firebase_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Authorize admin routes via Firebase claims or local DB role fallback."""
+    token_role = _admin_role_from_token(token)
+    if token_role in _ADMIN_ROLES:
+        return token
+
+    uid = token.get("uid")
+    if uid:
+        db_user = await db.get(User, uid)
+        db_role = (db_user.user_type or "").strip().lower() if db_user else ""
+        if db_user and db_user.is_active and db_role in _ADMIN_ROLES:
+            return token
+
+    raise HTTPException(status_code=403, detail="Admin access required")
+
+
+admin_router = APIRouter(
+    prefix="/admin",
+    tags=["Admin"],
+    dependencies=[Depends(require_admin_access)],
+)
 
 
 @admin_router.get("/ai/usage")
@@ -654,9 +1135,8 @@ async def get_safety_score(
 #  USER PHONE REGISTRATION (for SMS alerts)
 # ══════════════════════════════════════════════════════════════
 from sms_service import phone_registry, alert_dispatcher, sms_service
-from pydantic import BaseModel as PydanticBaseModel
 
-class PhoneRegistrationRequest(PydanticBaseModel):
+class PhoneRegistrationRequest(BaseModel):
     uid: str
     phone: str
     email: str = ""

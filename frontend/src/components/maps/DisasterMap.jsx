@@ -119,13 +119,20 @@ const DisasterMap = () => {
     try {
       // Fetch alerts
       const alertsRes = await axios.get(`${API_URL}/api/alerts`);
-      const alertsData = alertsRes.data.map(alert => ({
-        ...alert,
-        position: alert.coordinates ? {
-          lat: alert.coordinates.lat,
-          lng: alert.coordinates.lon || alert.coordinates.lng,
-        } : null,
-      })).filter(alert => alert.position);
+      const alertsPayload = alertsRes.data?.alerts || alertsRes.data || [];
+      const alertsData = (Array.isArray(alertsPayload) ? alertsPayload : [])
+        .map((alert) => {
+          const coords = alert.coordinates || alert.location_data || alert.location || {};
+          const lat = coords?.lat ?? coords?.latitude;
+          const lng = coords?.lon ?? coords?.lng ?? coords?.longitude;
+          return {
+            ...alert,
+            position: lat != null && lng != null
+              ? { lat: Number(lat), lng: Number(lng) }
+              : null,
+          };
+        })
+        .filter((alert) => alert.position);
       
       setAlerts(alertsData);
 

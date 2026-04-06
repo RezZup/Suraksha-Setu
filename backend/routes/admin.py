@@ -13,7 +13,40 @@ from datetime import datetime, timezone, timedelta
 from firebase_auth import verify_firebase_token
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin", tags=["Admin"])
+
+_ADMIN_ROLES = {"admin", "developer"}
+
+
+def _role_from_token(token: dict) -> str:
+    claims = token.get("firebase_claims") or {}
+    return (
+        claims.get("role")
+        or claims.get("user_type")
+        or token.get("role")
+        or ""
+    ).strip().lower()
+
+
+async def require_admin_user(
+    token: dict = Depends(verify_firebase_token),
+    db=Depends(get_db),
+):
+    """Allow admin/developer users via Firebase claims or local DB role."""
+    token_role = _role_from_token(token)
+    if token_role in _ADMIN_ROLES:
+        return token
+
+    uid = token.get("uid")
+    if uid:
+        db_user = await db.get(User, uid)
+        db_role = (db_user.user_type or "").strip().lower() if db_user else ""
+        if db_user and db_user.is_active and db_role in _ADMIN_ROLES:
+            return token
+
+    raise HTTPException(status_code=403, detail="Admin access required")
+
+
+router = APIRouter(prefix="/admin", tags=["Admin"], dependencies=[Depends(require_admin_user)])
 
 
 # ==================== REQUEST MODELS ====================

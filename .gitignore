@@ -77,3 +77,14 @@ coverage/
 encoded.txt
 main/
 functions/node_modules/
+
+# --- Extra local/tooling artifacts ---
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+frontend/.cache/
+frontend/.eslintcache
+.coverage
+coverage.xml
+build/
+dist/

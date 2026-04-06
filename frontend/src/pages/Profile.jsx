@@ -43,6 +43,8 @@ import {
   Navigation,
   Home,
   RefreshCw,
+  Plus,
+  Trash2,
 } from "lucide-react";
 import TelegramLinking from "@/components/profile/TelegramLinking";
 
@@ -113,6 +115,10 @@ export default function Profile() {
   const [showDicePicker, setShowDicePicker] = useState(false);
 
   const [homePincodeInput, setHomePincodeInput] = useState("");
+  const [savedLocations, setSavedLocations] = useState([]);
+  const [newSavedName, setNewSavedName] = useState("");
+  const [newSavedPincode, setNewSavedPincode] = useState("");
+  const [savingLocation, setSavingLocation] = useState(false);
 
   // Telegram linking
   const [telegramLink, setTelegramLink] = useState(null);
@@ -127,6 +133,7 @@ export default function Profile() {
   const displayEmail = user?.email || dbProfile?.email || "";
   const displayRole = user?.role || dbProfile?.user_type || "citizen";
   const telegramLinked = dbProfile?.telegram_linked || false;
+  const authToken = localStorage.getItem("auth_token") || "";
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -158,6 +165,7 @@ export default function Profile() {
       setRadiusKm(p.notification_radius_km ?? 50);
       setChannels(p.notification_channels || { telegram: true, email: true });
       setHomePincodeInput(p.home_pincode || "");
+      setSavedLocations(Array.isArray(p.saved_locations) ? p.saved_locations : []);
       if (p.avatar_url) setCustomAvatar(p.avatar_url);
       else {
         const cached = localStorage.getItem("user_avatar_url");
@@ -211,6 +219,74 @@ export default function Profile() {
       showToast("Failed to save profile", "error");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleAddSavedLocation = async () => {
+    const name = newSavedName.trim();
+    const pincode = newSavedPincode.trim();
+
+    if (!name) {
+      showToast("Enter a location name", "error");
+      return;
+    }
+    if (pincode && pincode.length !== 6) {
+      showToast("Pincode must be 6 digits", "error");
+      return;
+    }
+
+    setSavingLocation(true);
+    try {
+      const res = await fetch(`${BACKEND}/api/profile/${user.id}/saved-locations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({
+          name,
+          pincode: pincode || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || "Could not save location");
+
+      setSavedLocations(data.saved_locations || []);
+      setNewSavedName("");
+      setNewSavedPincode("");
+      showToast("Saved location added");
+    } catch (err) {
+      showToast(err?.message || "Failed to add location", "error");
+    } finally {
+      setSavingLocation(false);
+    }
+  };
+
+  const handleSetDefaultSavedLocation = async (locationId) => {
+    try {
+      const res = await fetch(`${BACKEND}/api/profile/${user.id}/saved-locations/${locationId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({ is_default: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || "Could not update default location");
+      setSavedLocations(data.saved_locations || []);
+      showToast("Default location updated");
+    } catch (err) {
+      showToast(err?.message || "Failed to update location", "error");
+    }
+  };
+
+  const handleDeleteSavedLocation = async (locationId) => {
+    try {
+      const res = await fetch(`${BACKEND}/api/profile/${user.id}/saved-locations/${locationId}`, {
+        method: "DELETE",
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || "Could not delete location");
+      setSavedLocations(data.saved_locations || []);
+      showToast("Saved location removed");
+    } catch (err) {
+      showToast(err?.message || "Failed to delete location", "error");
     }
   };
 
@@ -624,6 +700,70 @@ export default function Profile() {
                 />
                 <p className="text-xs text-muted-foreground">Your permanent home area. Alerts and community posts for this pincode will be shown to you.</p>
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Saved Locations</CardTitle>
+              <CardDescription>Add important locations like home, office, or family areas for quick switching.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <Input
+                  value={newSavedName}
+                  onChange={(e) => setNewSavedName(e.target.value)}
+                  placeholder="Location name (e.g. Office)"
+                />
+                <Input
+                  value={newSavedPincode}
+                  onChange={(e) => setNewSavedPincode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="Pincode (optional)"
+                  inputMode="numeric"
+                  className="font-mono tracking-widest"
+                />
+                <Button type="button" onClick={handleAddSavedLocation} disabled={savingLocation} className="gap-2">
+                  {savingLocation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                  Add Location
+                </Button>
+              </div>
+
+              {savedLocations.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No saved locations yet. Add one for faster alert targeting.</p>
+              ) : (
+                <div className="space-y-2">
+                  {savedLocations.map((loc) => (
+                    <div key={loc.id} className="flex items-center justify-between rounded-md border p-3">
+                      <div>
+                        <p className="text-sm font-medium flex items-center gap-2">
+                          <MapPin className="h-3.5 w-3.5 text-primary" />
+                          {loc.name}
+                        </p>
+                        {loc.pincode ? <p className="text-xs text-muted-foreground font-mono">PIN: {loc.pincode}</p> : null}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {loc.is_default ? (
+                          <Badge variant="secondary">Default</Badge>
+                        ) : (
+                          <Button type="button" variant="outline" size="sm" onClick={() => handleSetDefaultSavedLocation(loc.id)}>
+                            Set default
+                          </Button>
+                        )}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="text-destructive"
+                          onClick={() => handleDeleteSavedLocation(loc.id)}
+                          title="Delete saved location"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 

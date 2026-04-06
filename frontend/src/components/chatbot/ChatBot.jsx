@@ -105,6 +105,36 @@ const ChatBot = () => {
         }
       }
 
+      // Fall back to backend-persisted history for this session.
+      const historyRes = await axios.get(`${BACKEND_URL}/api/ai/history`, {
+        params: { session_id: sessionId, limit: 200 },
+        timeout: 10000,
+      });
+      const rows = historyRes.data?.messages || [];
+      if (Array.isArray(rows) && rows.length > 0) {
+        const hydrated = rows.flatMap((row) => {
+          const ts = row.timestamp || new Date().toISOString();
+          return [
+            {
+              id: `${row.id}_u`,
+              message: row.message || '',
+              response: '',
+              timestamp: ts,
+              isUser: true,
+            },
+            {
+              id: `${row.id}_b`,
+              message: row.message || '',
+              response: row.response || '',
+              timestamp: ts,
+              isUser: false,
+            },
+          ];
+        });
+        setMessages(hydrated);
+        return;
+      }
+
       setMessages([{
         id: 'welcome',
         message: '',
@@ -236,6 +266,8 @@ const ChatBot = () => {
         message: textToSend,
         query: textToSend,
         role: 'citizen',
+        session_id: sessionId,
+        user_id: user?.id,
         context: {
           user_location: 'India',
           session_id: sessionId,
