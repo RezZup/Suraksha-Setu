@@ -39,6 +39,13 @@ export const useWebSocket = (url, options = {}) => {
         return false;
       }
     }
+
+    // Keep the latest location payload and send it once the socket reconnects.
+    if (message?.type === 'set_location' && message?.location) {
+      locationRef.current = message.location;
+      return false;
+    }
+
     console.warn('WebSocket not connected. Message not sent:', message);
     return false;
   }, []);

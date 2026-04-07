@@ -43,6 +43,7 @@ import {
 import { Label } from '@/components/ui/label';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { motion } from 'framer-motion';
+import { getAuthHeadersForApi } from '@/utils/authHeaders';
 
 const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000');
 
@@ -114,8 +115,7 @@ const UserManagement = () => {
   const [createForm, setCreateForm] = useState({ name: '', email: '', role: 'citizen', status: 'active' });
 
   const getAuthHeaders = () => {
-    const token = localStorage.getItem('auth_token') || '';
-    return token ? { Authorization: `Bearer ${token}` } : {};
+    return getAuthHeadersForApi(API_URL, 'admin');
   };
 
   useEffect(() => {

@@ -36,6 +36,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import UserManagement from "@/components/admin/UserManagement";
 import { useTranslation } from 'react-i18next';
 import { cachedFetchJson } from '@/utils/requestCache';
+import { getAuthHeadersForApi } from '@/utils/authHeaders';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
@@ -78,23 +79,24 @@ const AdminDashboard = () => {
   const [tgFeedback, setTgFeedback] = useState('');
 
   const getAuthHeaders = () => {
-    const token = localStorage.getItem('auth_token') || '';
-    return token ? { Authorization: `Bearer ${token}` } : {};
+    return getAuthHeadersForApi(API_URL, 'admin');
   };
 
   const fetchData = useCallback(async () => {
     setIsRefreshing(true);
     try {
+      const authHeaders = getAuthHeaders();
+      const authFetch = { fetchOptions: { headers: authHeaders } };
       const [alertsRes, pendingRes, safetyRes, smsRes, incidentRes, smsLogRes, statsRes, logsRes, tgRes] = await Promise.allSettled([
-        cachedFetchJson(`${API_URL}/admin/alerts`, { ttlMs: 30 * 1000 }),
-        cachedFetchJson(`${API_URL}/admin/alerts/pending`, { ttlMs: 30 * 1000 }),
-        cachedFetchJson(`${API_URL}/admin/safety/status`, { ttlMs: 30 * 1000 }),
-        cachedFetchJson(`${API_URL}/api/sms/status`, { ttlMs: 30 * 1000 }),
-        cachedFetchJson(`${API_URL}/admin/incidents?limit=20`, { ttlMs: 30 * 1000 }),
-        cachedFetchJson(`${API_URL}/api/sms/audit-log?limit=20`, { ttlMs: 30 * 1000 }),
-        cachedFetchJson(`${API_URL}/admin/stats`, { ttlMs: 30 * 1000 }),
-        cachedFetchJson(`${API_URL}/admin/logs?limit=10`, { ttlMs: 30 * 1000 }),
-        cachedFetchJson(`${API_URL}/admin/telegram/stats`, { ttlMs: 30 * 1000 }),
+        cachedFetchJson(`${API_URL}/admin/alerts`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/alerts/pending`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/safety/status`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/api/sms/status`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/incidents?limit=20`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/api/sms/audit-log?limit=20`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/stats`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/logs?limit=10`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/telegram/stats`, { ttlMs: 30 * 1000, ...authFetch }),
       ]);
       if (alertsRes.status === 'fulfilled') setAlerts(alertsRes.value?.alerts || alertsRes.value || []);
       if (pendingRes.status === 'fulfilled') setPendingAlerts(pendingRes.value?.pending_alerts || []);
@@ -115,7 +117,13 @@ const AdminDashboard = () => {
 
   const fetchReports = useCallback(async (status = reportFilter) => {
     try {
-      const data = await cachedFetchJson(`${API_URL}/admin/reports?status=${status}&limit=50`, { ttlMs: 20 * 1000 });
+      const data = await cachedFetchJson(
+        `${API_URL}/admin/reports?status=${status}&limit=50`,
+        {
+          ttlMs: 20 * 1000,
+          fetchOptions: { headers: getAuthHeaders() },
+        }
+      );
       setReports(data?.reports || []);
     } catch (err) {
       console.error('Reports fetch error:', err);

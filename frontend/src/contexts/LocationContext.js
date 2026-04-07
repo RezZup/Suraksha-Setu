@@ -34,6 +34,7 @@ export const LocationProvider = ({ children }) => {
       return id;
     })()
   );
+  const profileSyncStateRef = useRef({ inFlight: false, lastAttemptAt: 0 });
 
   const wsUrl =
     BACKEND.replace('http://', 'ws://').replace('https://', 'wss://') +
@@ -111,18 +112,26 @@ export const LocationProvider = ({ children }) => {
     const syncKey = `profile_location_sync_${user.id}`;
     if (localStorage.getItem(syncKey) === signature) return;
 
+    const now = Date.now();
+    if (profileSyncStateRef.current.inFlight) return;
+    if (now - profileSyncStateRef.current.lastAttemptAt < 15000) return;
+
     const sync = async () => {
+      profileSyncStateRef.current.inFlight = true;
+      profileSyncStateRef.current.lastAttemptAt = Date.now();
       try {
         await axios.put(`${BACKEND}/api/profile/${user.id}`, payload, {
           headers: {
             Authorization: `Bearer ${token}`,
             'Content-Type': 'application/json',
           },
-          timeout: 10000,
+          timeout: 20000,
         });
         localStorage.setItem(syncKey, signature);
       } catch (e) {
         console.warn('Profile location sync failed:', e?.message || e);
+      } finally {
+        profileSyncStateRef.current.inFlight = false;
       }
     };
 
