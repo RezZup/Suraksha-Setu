@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Link, useLocation as useRouterLocation, Outlet, useNavigate } from 'react-router-dom';
 import { useLocation } from '@/contexts/LocationContext';
 import { 
@@ -63,7 +63,11 @@ const MainLayout = () => {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showAlertsDropdown, setShowAlertsDropdown] = useState(false);
+  const [headerSearchTerm, setHeaderSearchTerm] = useState('');
+  const [showSearchMenu, setShowSearchMenu] = useState(false);
+  const [searchHighlight, setSearchHighlight] = useState(0);
   const alertsDropdownRef = useRef(null);
+  const searchBoxRef = useRef(null);
 
   // Community notifications
   const [communityNotifs, setCommunityNotifs] = useState([]);
@@ -222,6 +226,108 @@ const MainLayout = () => {
 
   const navItems = getNavItems();
 
+  const searchableItems = useMemo(() => {
+    const q = headerSearchTerm.trim().toLowerCase();
+    if (!q) return [];
+
+    const pageHits = navItems
+      .filter((item) => item.label.toLowerCase().includes(q))
+      .map((item) => ({
+        type: 'page',
+        key: `page:${item.path}`,
+        label: item.label,
+        description: t('layout.searchGoToPage'),
+        value: item.path,
+      }));
+
+    const alertHits = (alerts || [])
+      .filter((a) => [a?.title, a?.description, a?.location].some((v) => String(v || '').toLowerCase().includes(q)))
+      .slice(0, 4)
+      .map((a, idx) => ({
+        type: 'alert',
+        key: `alert:${a?.id || idx}`,
+        label: a?.title || t('nav.alerts'),
+        description: `${t('layout.searchInAlerts')} ${String(a?.severity || '').toUpperCase()}`.trim(),
+        value: a?.title || '',
+      }));
+
+    const communityHits = (communityNotifs || [])
+      .filter((n) => [n?.title, n?.message].some((v) => String(v || '').toLowerCase().includes(q)))
+      .slice(0, 3)
+      .map((n, idx) => ({
+        type: 'community',
+        key: `community:${n?.id || idx}`,
+        label: n?.title || t('nav.community'),
+        description: t('layout.searchInCommunity'),
+        value: '/app/community',
+      }));
+
+    return [...pageHits, ...alertHits, ...communityHits].slice(0, 8);
+  }, [headerSearchTerm, navItems, alerts, communityNotifs, t]);
+
+  const selectSearchItem = (item) => {
+    if (!item) return;
+    if (item.type === 'page') {
+      navigate(item.value);
+    } else if (item.type === 'alert') {
+      navigate(`/app/alerts?q=${encodeURIComponent(item.value)}`);
+    } else {
+      navigate(item.value || '/app/community');
+    }
+    setShowSearchMenu(false);
+    setHeaderSearchTerm('');
+    setSearchHighlight(0);
+  };
+
+  const submitSearch = () => {
+    const q = headerSearchTerm.trim();
+    if (!q) return;
+    if (searchableItems.length > 0) {
+      selectSearchItem(searchableItems[Math.min(searchHighlight, searchableItems.length - 1)]);
+      return;
+    }
+    navigate(`/app/alerts?q=${encodeURIComponent(q)}`);
+    setShowSearchMenu(false);
+    setHeaderSearchTerm('');
+    setSearchHighlight(0);
+  };
+
+  const handleSearchKeyDown = (event) => {
+    if (!showSearchMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      setShowSearchMenu(true);
+      return;
+    }
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setSearchHighlight((prev) => Math.min(prev + 1, Math.max(0, searchableItems.length - 1)));
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setSearchHighlight((prev) => Math.max(prev - 1, 0));
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      submitSearch();
+    } else if (event.key === 'Escape') {
+      setShowSearchMenu(false);
+    }
+  };
+
+  useEffect(() => {
+    setSearchHighlight(0);
+  }, [headerSearchTerm]);
+
+  useEffect(() => {
+    const handleSearchClickOutside = (event) => {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(event.target)) {
+        setShowSearchMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleSearchClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleSearchClickOutside);
+    };
+  }, []);
+
   return (
     <div className="min-h-screen bg-background flex overflow-hidden">
       {/* Sidebar */}
@@ -323,12 +429,45 @@ const MainLayout = () => {
             >
               <Menu className="h-5 w-5" />
             </Button>
-            <div className="hidden md:flex items-center relative max-w-md w-64">
+            <div ref={searchBoxRef} className="hidden md:flex items-center relative max-w-md w-72">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input 
-                placeholder="Search alerts, locations..." 
+                value={headerSearchTerm}
+                onChange={(e) => {
+                  setHeaderSearchTerm(e.target.value);
+                  setShowSearchMenu(true);
+                }}
+                onFocus={() => setShowSearchMenu(true)}
+                onKeyDown={handleSearchKeyDown}
+                placeholder={t('layout.searchPlaceholder')}
                 className="pl-9 bg-muted/50 border-none focus-visible:ring-1"
               />
+              {showSearchMenu && headerSearchTerm.trim() && (
+                <div className="absolute top-11 left-0 right-0 rounded-lg border bg-popover shadow-xl z-50 overflow-hidden">
+                  {searchableItems.length === 0 ? (
+                    <div className="px-3 py-3 text-xs text-muted-foreground">
+                      {t('layout.searchNoResults')}
+                    </div>
+                  ) : (
+                    <div className="max-h-64 overflow-auto">
+                      {searchableItems.map((item, index) => (
+                        <button
+                          key={item.key}
+                          type="button"
+                          className={`w-full text-left px-3 py-2.5 border-b last:border-b-0 transition-colors ${index === searchHighlight ? 'bg-muted' : 'hover:bg-muted/70'}`}
+                          onClick={() => selectSearchItem(item)}
+                        >
+                          <p className="text-sm font-medium truncate">{item.label}</p>
+                          <p className="text-[11px] text-muted-foreground truncate">{item.description}</p>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div className="px-3 py-1.5 text-[10px] text-muted-foreground bg-muted/40 border-t">
+                    {t('layout.searchHint')}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

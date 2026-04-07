@@ -34,6 +34,7 @@
     "@react-google-maps/api": "^2.20.8",
     "ajv": "^8.17.1",
     "axios": "^1.8.4",
+    "boneyard-js": "^1.6.4",
     "cesium": "^1.135.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -74,7 +75,8 @@
   "scripts": {
     "start": "craco start",
     "build": "craco build",
-    "test": "craco test"
+    "test": "craco test",
+    "bones:build": "boneyard-js build"
   },
   "browserslist": {
     "production": [

@@ -37,6 +37,7 @@ import UserManagement from "@/components/admin/UserManagement";
 import { useTranslation } from 'react-i18next';
 import { cachedFetchJson } from '@/utils/requestCache';
 import { getAuthHeadersForApi } from '@/utils/authHeaders';
+import { Skeleton } from 'boneyard-js/react';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
@@ -78,6 +79,24 @@ const AdminDashboard = () => {
   const [tgSending, setTgSending] = useState(false);
   const [tgFeedback, setTgFeedback] = useState('');
 
+  // Multi-channel broadcast state
+  const [broadcastChannelStats, setBroadcastChannelStats] = useState(null);
+  const [broadcastTitle, setBroadcastTitle] = useState('');
+  const [broadcastMessage, setBroadcastMessage] = useState('');
+  const [broadcastPrompt, setBroadcastPrompt] = useState('');
+  const [broadcastSeverity, setBroadcastSeverity] = useState('warning');
+  const [broadcastAlertId, setBroadcastAlertId] = useState('');
+  const [broadcastGenerating, setBroadcastGenerating] = useState(false);
+  const [broadcastSending, setBroadcastSending] = useState(false);
+  const [broadcastFeedback, setBroadcastFeedback] = useState('');
+  const [broadcastChannels, setBroadcastChannels] = useState({
+    telegram: true,
+    sms: true,
+    email: true,
+    push: false,
+    websocket: false,
+  });
+
   const getAuthHeaders = () => {
     return getAuthHeadersForApi(API_URL, 'admin');
   };
@@ -87,7 +106,7 @@ const AdminDashboard = () => {
     try {
       const authHeaders = getAuthHeaders();
       const authFetch = { fetchOptions: { headers: authHeaders } };
-      const [alertsRes, pendingRes, safetyRes, smsRes, incidentRes, smsLogRes, statsRes, logsRes, tgRes] = await Promise.allSettled([
+      const [alertsRes, pendingRes, safetyRes, smsRes, incidentRes, smsLogRes, statsRes, logsRes, tgRes, bcRes] = await Promise.allSettled([
         cachedFetchJson(`${API_URL}/admin/alerts`, { ttlMs: 30 * 1000, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/alerts/pending`, { ttlMs: 30 * 1000, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/safety/status`, { ttlMs: 30 * 1000, ...authFetch }),
@@ -97,6 +116,7 @@ const AdminDashboard = () => {
         cachedFetchJson(`${API_URL}/admin/stats`, { ttlMs: 30 * 1000, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/logs?limit=10`, { ttlMs: 30 * 1000, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/telegram/stats`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/broadcast/channels`, { ttlMs: 30 * 1000, ...authFetch }),
       ]);
       if (alertsRes.status === 'fulfilled') setAlerts(alertsRes.value?.alerts || alertsRes.value || []);
       if (pendingRes.status === 'fulfilled') setPendingAlerts(pendingRes.value?.pending_alerts || []);
@@ -107,6 +127,7 @@ const AdminDashboard = () => {
       if (statsRes.status === 'fulfilled') setStats(statsRes.value);
       if (logsRes.status === 'fulfilled') setSystemLogs(logsRes.value?.logs || []);
       if (tgRes.status === 'fulfilled') setTelegramStats(tgRes.value);
+      if (bcRes.status === 'fulfilled') setBroadcastChannelStats(bcRes.value);
       setLastUpdated(new Date());
     } catch (err) {
       console.error('Admin fetch error:', err);
@@ -300,13 +321,117 @@ const AdminDashboard = () => {
     }
   };
 
+  const handleGenerateBroadcastMessage = async () => {
+    const prompt = broadcastPrompt.trim();
+    if (!prompt) {
+      setBroadcastFeedback('Enter a prompt first to generate a message.');
+      return;
+    }
+
+    setBroadcastGenerating(true);
+    setBroadcastFeedback('');
+
+    try {
+      const genPrompt = [
+        'Create a clear public safety broadcast message.',
+        `Severity: ${broadcastSeverity}`,
+        'Output must be concise, practical, and avoid panic.',
+        'Include one immediate action and one helpline hint.',
+        `Context: ${prompt}`,
+      ].join('\n');
+
+      const res = await fetch(`${API_URL}/api/ai/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          role: 'citizen',
+          message: genPrompt,
+          context: { domain: 'admin_broadcast', style: 'short_public_alert' },
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || 'AI generation failed');
+
+      const generated = (data?.response || '').trim();
+      if (!generated) throw new Error('AI returned an empty message');
+
+      setBroadcastMessage(generated);
+      if (!broadcastTitle.trim()) {
+        setBroadcastTitle(`Admin ${broadcastSeverity === 'critical' ? 'Emergency' : 'Update'}`);
+      }
+      setBroadcastFeedback('✅ Message generated. Review and send when ready.');
+    } catch (err) {
+      setBroadcastFeedback(`❌ ${err.message}`);
+    } finally {
+      setBroadcastGenerating(false);
+    }
+  };
+
+  const handleMultiChannelBroadcast = async () => {
+    const selectedChannels = Object.entries(broadcastChannels)
+      .filter(([, enabled]) => enabled)
+      .map(([name]) => name);
+
+    if (!broadcastMessage.trim() && !broadcastAlertId) {
+      setBroadcastFeedback('Enter or generate a message, or select an alert template.');
+      return;
+    }
+
+    if (selectedChannels.length === 0) {
+      setBroadcastFeedback('Select at least one broadcast channel.');
+      return;
+    }
+
+    setBroadcastSending(true);
+    setBroadcastFeedback('');
+
+    try {
+      const payload = {
+        title: broadcastTitle.trim() || 'Admin Broadcast',
+        message: broadcastMessage.trim(),
+        severity: broadcastSeverity,
+        alert_type: 'admin_update',
+        alert_id: broadcastAlertId || undefined,
+        channels: selectedChannels,
+      };
+
+      const res = await fetch(`${API_URL}/admin/broadcast/multi-channel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || 'Broadcast failed');
+
+      const summary = Object.entries(data?.results || {})
+        .map(([channel, result]) => `${channel}: ${result?.sent || 0}/${result?.total || 0}`)
+        .join(' | ');
+
+      setBroadcastFeedback(`✅ Broadcast sent. ${summary}`);
+      setBroadcastAlertId('');
+      fetchData();
+    } catch (err) {
+      setBroadcastFeedback(`❌ ${err.message}`);
+    } finally {
+      setBroadcastSending(false);
+    }
+  };
+
   const activeAlerts = Array.isArray(alerts) ? alerts.filter(a => a.is_active && !a.retracted) : [];
   const handleManualRefresh = () => {
     fetchData();
     if (activeTab === 'reports') fetchReports();
   };
 
+  const initialLoading = isRefreshing && !lastUpdated;
+
   return (
+    <Skeleton
+      name="admin-dashboard-page"
+      loading={initialLoading}
+      fallback={<p className="py-10 text-center text-sm text-muted-foreground">Loading admin dashboard...</p>}
+    >
     <div className="max-w-7xl mx-auto space-y-6 pb-6">
       <div className="sticky top-0 z-20 bg-background/90 backdrop-blur-sm border-b -mx-4 px-4 py-4 md:mx-0 md:px-0 md:border-0 md:bg-transparent md:backdrop-blur-none">
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
@@ -346,6 +471,10 @@ const AdminDashboard = () => {
           <TabsTrigger value="telegram" className="gap-2">
             <Bot className="w-4 h-4" />
             Telegram
+          </TabsTrigger>
+          <TabsTrigger value="broadcast" className="gap-2">
+            <Radio className="w-4 h-4" />
+            Broadcast
           </TabsTrigger>
           <TabsTrigger value="reports" className="gap-2">
             <FileWarning className="w-4 h-4" />
@@ -752,24 +881,25 @@ const AdminDashboard = () => {
                     onChange={e => setTgBroadcastAlertId(e.target.value)}
                   >
                     <option value="">— Custom message (no alert) —</option>
-                    {alerts.filter(a => a.is_active).map(a => (
+                    {alerts.slice(0, 30).map(a => (
                       <option key={a.id} value={a.id}>
-                        [{a.severity?.toUpperCase()}] {a.title}
+                        [{a.severity?.toUpperCase()}]{a.is_active ? ' [ACTIVE]' : ''} {a.title}
                       </option>
                     ))}
                   </select>
                 </div>
-                {!tgBroadcastAlertId && (
-                  <div>
-                    <label className="text-sm font-medium mb-1 block">Custom Message</label>
-                    <textarea
-                      className="w-full border rounded-md p-2 text-sm min-h-[80px] resize-y bg-background"
-                      placeholder="Type your broadcast message..."
-                      value={tgBroadcastMsg}
-                      onChange={e => setTgBroadcastMsg(e.target.value)}
-                    />
-                  </div>
-                )}
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Custom Message (optional)</label>
+                  <textarea
+                    className="w-full border rounded-md p-2 text-sm min-h-[80px] resize-y bg-background"
+                    placeholder="Type your broadcast message..."
+                    value={tgBroadcastMsg}
+                    onChange={e => setTgBroadcastMsg(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    If alert template is selected, Telegram will send alert card format. Keep message for quick custom broadcast.
+                  </p>
+                </div>
                 <Button
                   onClick={handleTelegramBroadcast}
                   disabled={tgSending || (!tgBroadcastMsg.trim() && !tgBroadcastAlertId)}
@@ -801,6 +931,146 @@ const AdminDashboard = () => {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* ═══════ MULTI-CHANNEL BROADCAST TAB ═══════ */}
+        <TabsContent value="broadcast" className="space-y-6">
+          {broadcastFeedback && (
+            <Alert className={broadcastFeedback.startsWith('✅') ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'}>
+              <AlertDescription className={broadcastFeedback.startsWith('✅') ? 'text-green-800' : 'text-red-800'}>
+                {broadcastFeedback}
+              </AlertDescription>
+            </Alert>
+          )}
+
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+            <Card className="xl:col-span-2">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Send className="w-5 h-5" /> Broadcast Composer
+                </CardTitle>
+                <CardDescription>
+                  Create one message and dispatch to selected channels (Telegram, SMS, Email, Push, WebSocket).
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="md:col-span-2">
+                    <label className="text-sm font-medium mb-1 block">Title</label>
+                    <Input
+                      value={broadcastTitle}
+                      onChange={(e) => setBroadcastTitle(e.target.value)}
+                      placeholder="e.g. Heavy Rain Advisory"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium mb-1 block">Severity</label>
+                    <select
+                      value={broadcastSeverity}
+                      onChange={(e) => setBroadcastSeverity(e.target.value)}
+                      className="w-full border rounded-md p-2 text-sm bg-background"
+                    >
+                      <option value="info">Info</option>
+                      <option value="warning">Warning</option>
+                      <option value="critical">Critical</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Use Existing Alert Template (optional)</label>
+                  <select
+                    value={broadcastAlertId}
+                    onChange={(e) => setBroadcastAlertId(e.target.value)}
+                    className="w-full border rounded-md p-2 text-sm bg-background"
+                  >
+                    <option value="">— No template —</option>
+                    {alerts.slice(0, 30).map((a) => (
+                      <option key={a.id} value={a.id}>
+                        [{a.severity?.toUpperCase()}]{a.is_active ? ' [ACTIVE]' : ''} {a.title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Broadcast Message</label>
+                  <textarea
+                    className="w-full border rounded-md p-3 text-sm min-h-[140px] resize-y bg-background"
+                    placeholder="Type your public message, or generate one using AI below..."
+                    value={broadcastMessage}
+                    onChange={(e) => setBroadcastMessage(e.target.value)}
+                  />
+                </div>
+
+                <div className="border rounded-lg p-3 bg-muted/40 space-y-3">
+                  <label className="text-sm font-medium block">AI Message Generator</label>
+                  <Input
+                    value={broadcastPrompt}
+                    onChange={(e) => setBroadcastPrompt(e.target.value)}
+                    placeholder="Describe situation (location, risk, timeline, desired tone)..."
+                  />
+                  <Button
+                    onClick={handleGenerateBroadcastMessage}
+                    disabled={broadcastGenerating || !broadcastPrompt.trim()}
+                    variant="outline"
+                    className="gap-2"
+                  >
+                    <Bot className="w-4 h-4" />
+                    {broadcastGenerating ? 'Generating...' : 'Generate Message with AI'}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Channels & Dispatch</CardTitle>
+                <CardDescription>
+                  Choose available channels and send one click broadcast.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {[
+                  { key: 'telegram', label: 'Telegram' },
+                  { key: 'sms', label: 'SMS' },
+                  { key: 'email', label: 'Email' },
+                  { key: 'push', label: 'Push' },
+                  { key: 'websocket', label: 'WebSocket' },
+                ].map((ch) => {
+                  const stats = broadcastChannelStats?.[ch.key];
+                  const enabled = stats?.enabled !== false;
+                  return (
+                    <label key={ch.key} className={`flex items-center justify-between p-2 rounded-md border ${enabled ? '' : 'opacity-50'}`}>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={!!broadcastChannels[ch.key]}
+                          disabled={!enabled}
+                          onChange={(e) => setBroadcastChannels((prev) => ({ ...prev, [ch.key]: e.target.checked }))}
+                        />
+                        <span className="text-sm font-medium">{ch.label}</span>
+                      </div>
+                      <span className="text-xs text-muted-foreground">{stats?.recipients ?? 0}</span>
+                    </label>
+                  );
+                })}
+
+                <Button
+                  className="w-full gap-2"
+                  onClick={handleMultiChannelBroadcast}
+                  disabled={broadcastSending || (!broadcastMessage.trim() && !broadcastAlertId)}
+                >
+                  <Radio className="w-4 h-4" />
+                  {broadcastSending ? 'Broadcasting...' : 'Send Multi-Channel Broadcast'}
+                </Button>
+
+                <p className="text-xs text-muted-foreground">
+                  Tip: choose Telegram + SMS for urgent updates; add Email for detailed advisories.
+                </p>
+              </CardContent>
+            </Card>
+          </div>
         </TabsContent>
 
         {/* ═══════ ALERT SAFETY TAB ═══════ */}
@@ -1137,6 +1407,7 @@ const AdminDashboard = () => {
         </TabsContent>
       </Tabs>
     </div>
+    </Skeleton>
   );
 };
 

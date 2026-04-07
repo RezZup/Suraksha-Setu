@@ -7,10 +7,126 @@ from typing import Optional
 import logging
 import httpx
 import uuid
+import math
 
 logger = logging.getLogger(__name__)
 
 location_router = APIRouter(prefix="/api/location", tags=["Location"])
+
+OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
+
+
+SERVICE_FILTERS = {
+    "hospital": [
+        '["amenity"="hospital"]',
+        '["amenity"="clinic"]',
+        '["amenity"="doctors"]',
+    ],
+    "police": ['["amenity"="police"]'],
+    "fire_station": ['["amenity"="fire_station"]'],
+    "disaster_management_center": [
+        '["government"="disaster_management"]',
+        '["office"="government"]["government"~"disaster|civil_defence|emergency",i]',
+    ],
+    "emergency_center": [
+        '["emergency"="ambulance_station"]',
+        '["emergency"="rescue_station"]',
+        '["amenity"="ambulance_station"]',
+    ],
+    "help_center": [
+        '["social_facility"="shelter"]',
+        '["amenity"="community_centre"]',
+        '["amenity"="social_facility"]',
+        '["amenity"="townhall"]',
+    ],
+}
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    to_rad = math.radians
+    d_lat = to_rad(lat2 - lat1)
+    d_lon = to_rad(lon2 - lon1)
+    a = (
+        math.sin(d_lat / 2) ** 2
+        + math.cos(to_rad(lat1)) * math.cos(to_rad(lat2)) * math.sin(d_lon / 2) ** 2
+    )
+    return 6371.0 * 2 * math.atan2(math.sqrt(a), math.sqrt(max(1e-12, 1 - a)))
+
+
+def _classify_service(tags: dict) -> str:
+    amenity = (tags.get("amenity") or "").lower()
+    emergency = (tags.get("emergency") or "").lower()
+    government = (tags.get("government") or "").lower()
+    social = (tags.get("social_facility") or "").lower()
+
+    if amenity in {"hospital", "clinic", "doctors"}:
+        return "hospital"
+    if amenity == "police":
+        return "police"
+    if amenity == "fire_station":
+        return "fire_station"
+    if government in {"disaster_management", "civil_defence", "emergency_management"}:
+        return "disaster_management_center"
+    if emergency in {"ambulance_station", "rescue_station"} or amenity == "ambulance_station":
+        return "emergency_center"
+    if social == "shelter" or amenity in {"community_centre", "social_facility", "townhall"}:
+        return "help_center"
+    return "help_center"
+
+
+def _fallback_services(lat: float, lon: float) -> list[dict]:
+    base = [
+        ("hospital", "Nearby Hospital", 0.015, 0.012),
+        ("police", "Police Assistance Center", -0.013, 0.01),
+        ("fire_station", "Fire Response Station", 0.01, -0.014),
+        ("disaster_management_center", "Disaster Management Office", -0.018, -0.01),
+        ("emergency_center", "Emergency Operations Center", 0.02, 0.0),
+        ("help_center", "Community Help Center", -0.007, 0.017),
+    ]
+    rows = []
+    for idx, (service_type, name, d_lat, d_lon) in enumerate(base, start=1):
+        s_lat = lat + d_lat
+        s_lon = lon + d_lon
+        rows.append(
+            {
+                "id": f"fallback_{service_type}_{idx}",
+                "name": name,
+                "service_type": service_type,
+                "lat": round(s_lat, 6),
+                "lon": round(s_lon, 6),
+                "distance_km": round(_haversine_km(lat, lon, s_lat, s_lon), 2),
+                "source": "fallback",
+                "address": "Approximate location",
+            }
+        )
+    return rows
+
+
+async def _fetch_overpass_elements(query: str) -> list[dict]:
+    """Try multiple Overpass endpoints to improve availability."""
+    last_error = None
+
+    for endpoint in OVERPASS_ENDPOINTS:
+        try:
+            async with httpx.AsyncClient(timeout=20.0, headers={"User-Agent": "SurakshaSetu/1.0"}) as client:
+                resp = await client.post(endpoint, data={"data": query})
+                resp.raise_for_status()
+                payload = resp.json() or {}
+                elements = payload.get("elements", []) if isinstance(payload, dict) else []
+                if isinstance(elements, list):
+                    return elements
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Overpass endpoint failed (%s): %s", endpoint, exc)
+
+    if last_error:
+        raise last_error
+
+    return []
 
 
 class LocationUpdate(BaseModel):
@@ -455,3 +571,127 @@ async def get_nearby_alerts(lat: float = 28.6139, lon: float = 77.209, radius_km
     except Exception as e:
         logger.error(f"Error fetching nearby alerts: {e}")
         return {"alerts": [], "radius_km": radius_km, "count": 0}
+
+
+@location_router.get("/nearby-services")
+async def get_nearby_services(
+    lat: float,
+    lon: float,
+    radius_km: float = 10,
+    categories: Optional[str] = None,
+):
+    """Get nearby emergency service points around a location using OpenStreetMap Overpass."""
+    bounded_radius = max(1.0, min(float(radius_km or 10), 50.0))
+
+    selected_categories = [
+        c.strip().lower()
+        for c in (categories or "").split(",")
+        if c.strip()
+    ]
+    if not selected_categories:
+        selected_categories = list(SERVICE_FILTERS.keys())
+
+    selected_categories = [c for c in selected_categories if c in SERVICE_FILTERS]
+    if not selected_categories:
+        raise HTTPException(status_code=400, detail="No valid service categories requested")
+
+    radius_m = int(bounded_radius * 1000)
+    overpass_parts: list[str] = []
+
+    for service_type in selected_categories:
+        for filter_expr in SERVICE_FILTERS[service_type]:
+            overpass_parts.append(f"nwr(around:{radius_m},{lat},{lon}){filter_expr};")
+
+    query = (
+        "[out:json][timeout:20];"
+        "("
+        + "".join(overpass_parts)
+        + ");"
+        "out center tags;"
+    )
+
+    try:
+        elements = await _fetch_overpass_elements(query)
+        rows: list[dict] = []
+        seen: set[str] = set()
+
+        for element in elements:
+            tags = element.get("tags", {}) or {}
+            e_lat = element.get("lat")
+            e_lon = element.get("lon")
+
+            if e_lat is None or e_lon is None:
+                center = element.get("center") or {}
+                e_lat = center.get("lat")
+                e_lon = center.get("lon")
+
+            if e_lat is None or e_lon is None:
+                continue
+
+            service_type = _classify_service(tags)
+            if service_type not in selected_categories:
+                continue
+
+            osm_key = f"{element.get('type', 'el')}:{element.get('id', '')}"
+            if not osm_key or osm_key in seen:
+                continue
+            seen.add(osm_key)
+
+            dist_km = _haversine_km(lat, lon, float(e_lat), float(e_lon))
+            if dist_km > bounded_radius + 0.3:
+                continue
+
+            name = (
+                tags.get("name")
+                or tags.get("operator")
+                or tags.get("brand")
+                or service_type.replace("_", " ").title()
+            )
+
+            addr_bits = [
+                tags.get("addr:street"),
+                tags.get("addr:suburb"),
+                tags.get("addr:city"),
+            ]
+            address = ", ".join([a for a in addr_bits if a])
+
+            rows.append(
+                {
+                    "id": osm_key,
+                    "name": str(name),
+                    "service_type": service_type,
+                    "lat": float(e_lat),
+                    "lon": float(e_lon),
+                    "distance_km": round(dist_km, 2),
+                    "source": "overpass",
+                    "address": address,
+                }
+            )
+
+        rows.sort(key=lambda r: r["distance_km"])
+        rows = rows[:200]
+
+        if not rows:
+            fallback = [s for s in _fallback_services(lat, lon) if s["service_type"] in selected_categories]
+            return {
+                "services": fallback,
+                "count": len(fallback),
+                "radius_km": bounded_radius,
+                "source": "fallback",
+            }
+
+        return {
+            "services": rows,
+            "count": len(rows),
+            "radius_km": bounded_radius,
+            "source": "overpass",
+        }
+    except Exception as e:
+        logger.warning("Nearby services lookup failed, using fallback: %s", e)
+        fallback = [s for s in _fallback_services(lat, lon) if s["service_type"] in selected_categories]
+        return {
+            "services": fallback,
+            "count": len(fallback),
+            "radius_km": bounded_radius,
+            "source": "fallback",
+        }

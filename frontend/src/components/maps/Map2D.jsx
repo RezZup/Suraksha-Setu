@@ -1,7 +1,81 @@
-import React, { useEffect, useState, useMemo } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Circle, Polyline, Tooltip, useMap } from 'react-leaflet';
+import React, { useEffect, useState } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, Circle, Polyline, Tooltip, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+
+const FLATICON_ICONS = {
+  hospital: 'https://cdn-icons-png.flaticon.com/512/3448/3448513.png',
+  police: 'https://cdn-icons-png.flaticon.com/512/1022/1022331.png',
+  fire_station: 'https://cdn-icons-png.flaticon.com/512/599/599502.png',
+  disaster_management_center: 'https://cdn-icons-png.flaticon.com/512/1256/1256650.png',
+  emergency_center: 'https://cdn-icons-png.flaticon.com/512/2776/2776000.png',
+  help_center: 'https://cdn-icons-png.flaticon.com/512/869/869869.png',
+  heavy_rain: 'https://cdn-icons-png.flaticon.com/512/2840/2840269.png',
+  flood: 'https://cdn-icons-png.flaticon.com/512/483/483361.png',
+  tsunami: 'https://cdn-icons-png.flaticon.com/512/2204/2204346.png',
+  volcano: 'https://cdn-icons-png.flaticon.com/512/2204/2204304.png',
+  heatwave: 'https://cdn-icons-png.flaticon.com/512/3480/3480417.png',
+  fire: 'https://cdn-icons-png.flaticon.com/512/1695/1695213.png',
+  cyclone: 'https://cdn-icons-png.flaticon.com/512/3105/3105807.png',
+  earthquake: 'https://cdn-icons-png.flaticon.com/512/1684/1684375.png',
+  landslide: 'https://cdn-icons-png.flaticon.com/512/4820/4820785.png',
+  drought: 'https://cdn-icons-png.flaticon.com/512/1146/1146869.png',
+  other: 'https://cdn-icons-png.flaticon.com/512/1146/1146860.png',
+  alert_critical: 'https://cdn-icons-png.flaticon.com/512/2776/2776067.png',
+  alert_warning: 'https://cdn-icons-png.flaticon.com/512/1256/1256650.png',
+  alert_info: 'https://cdn-icons-png.flaticon.com/512/3448/3448513.png',
+};
+
+const createFlaticonPin = ({
+  iconUrl,
+  fallbackLabel,
+  background,
+  ringColor,
+  size = 32,
+  pinShape = false,
+}) => {
+  const wrapperStyle = pinShape
+    ? `
+      width:${size}px;
+      height:${size}px;
+      border-radius:50% 50% 50% 0;
+      transform:rotate(-45deg);
+      border:2px solid white;
+      background:${background};
+      box-shadow:0 2px 8px rgba(0,0,0,0.35);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+    `
+    : `
+      width:${size}px;
+      height:${size}px;
+      border-radius:50%;
+      border:2px solid white;
+      background:${background};
+      box-shadow:0 0 0 3px ${ringColor}55, 0 2px 8px rgba(0,0,0,0.35);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+    `;
+
+  const innerStyle = pinShape ? 'transform:rotate(45deg);' : '';
+
+  return L.divIcon({
+    className: pinShape ? 'custom-service-marker' : 'custom-flaticon-marker',
+    html: `
+      <div style="${wrapperStyle}">
+        <div style="${innerStyle} display:flex; align-items:center; justify-content:center; width:${Math.round(size * 0.6)}px; height:${Math.round(size * 0.6)}px;">
+          <img src="${iconUrl}" alt="" style="width:${Math.round(size * 0.52)}px;height:${Math.round(size * 0.52)}px;" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';" />
+          <span style="display:none; align-items:center; justify-content:center; color:white; font-size:${Math.max(10, Math.round(size * 0.3))}px; font-weight:700;">${fallbackLabel}</span>
+        </div>
+      </div>
+    `,
+    iconSize: pinShape ? [size, size + 10] : [size, size],
+    iconAnchor: pinShape ? [Math.round(size / 2), size] : [Math.round(size / 2), Math.round(size / 2)],
+    popupAnchor: pinShape ? [0, -Math.round(size * 0.8)] : [0, -Math.round(size * 0.6)],
+  });
+};
 
 // AQI Heat Map Layer Component
 function AQIHeatMap({ stations }) {
@@ -150,53 +224,88 @@ const createAQIIcon = (aqi, category) => {
 };
 
 // Custom alert marker icon
-const createAlertIcon = (severity) => {
-  const color = severity === 'critical' || severity === 'red' ? '#EF4444'
-    : severity === 'warning' || severity === 'orange' ? '#F59E0B'
-    : '#3B82F6';
-  return L.divIcon({
-    className: 'custom-alert-marker',
-    html: `<div style="
-      background-color: ${color};
-      width: 28px;
-      height: 28px;
-      border-radius: 50%;
-      border: 3px solid white;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: bold;
-      font-size: 16px;
-      color: white;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-    ">!</div>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
+const createAlertIcon = (alert) => {
+  const severity = String(alert?.severity || '').toLowerCase();
+  const isCritical = severity === 'critical' || severity === 'red' || severity === 'high';
+  const isWarning = severity === 'warning' || severity === 'orange' || severity === 'moderate';
+  const iconKey = isCritical ? 'alert_critical' : isWarning ? 'alert_warning' : 'alert_info';
+  const ringColor = isCritical ? '#DC2626' : isWarning ? '#F59E0B' : '#2563EB';
+  const bg = isCritical ? '#EF4444' : isWarning ? '#F59E0B' : '#3B82F6';
+
+  return createFlaticonPin({
+    iconUrl: FLATICON_ICONS[iconKey],
+    fallbackLabel: '!',
+    background: bg,
+    ringColor,
+    size: 32,
+    pinShape: false,
   });
 };
 
-const createDisasterIcon = (severity = 'low', type = 'disaster') => {
-  const color = severity === 'extreme' || severity === 'high' ? '#DC2626'
-    : severity === 'moderate' ? '#EA580C'
-    : '#2563EB';
-  const emoji = type === 'earthquake' ? '🌍' : type === 'flood' ? '🌊' : type === 'cyclone' ? '🌀' : '⚠️';
+const DISASTER_ICON_META = {
+  heavy_rain: { label: 'RN', color: '#2563EB', iconKey: 'heavy_rain' },
+  flood: { label: 'FL', color: '#1D4ED8', iconKey: 'flood' },
+  tsunami: { label: 'TS', color: '#0EA5E9', iconKey: 'tsunami' },
+  volcano: { label: 'VO', color: '#B45309', iconKey: 'volcano' },
+  heatwave: { label: 'HW', color: '#DC2626', iconKey: 'heatwave' },
+  fire: { label: 'FR', color: '#EA580C', iconKey: 'fire' },
+  earthquake: { label: 'EQ', color: '#A855F7', iconKey: 'earthquake' },
+  cyclone: { label: 'CY', color: '#7C3AED', iconKey: 'cyclone' },
+  landslide: { label: 'LS', color: '#92400E', iconKey: 'landslide' },
+  drought: { label: 'DR', color: '#CA8A04', iconKey: 'drought' },
+  other: { label: 'AL', color: '#0F766E', iconKey: 'other' },
+};
 
-  return L.divIcon({
-    className: 'custom-disaster-marker',
-    html: `<div style="
-      background-color: ${color};
-      width: 30px;
-      height: 30px;
-      border-radius: 50%;
-      border: 2px solid white;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 14px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.35);
-    ">${emoji}</div>`,
-    iconSize: [30, 30],
-    iconAnchor: [15, 15],
+const normalizeDisasterType = (rawType = '') => {
+  const t = String(rawType || '').toLowerCase();
+  if (t.includes('heavy_rain') || t.includes('heavy rain') || t.includes('rainfall') || t.includes('cloudburst')) return 'heavy_rain';
+  if (t.includes('flood')) return 'flood';
+  if (t.includes('tsunami')) return 'tsunami';
+  if (t.includes('volcano') || t.includes('volcanic')) return 'volcano';
+  if (t.includes('heatwave') || t.includes('heat wave') || t.includes('extreme heat')) return 'heatwave';
+  if (t.includes('fire') || t.includes('wildfire') || t.includes('forest_fire')) return 'fire';
+  if (t.includes('earthquake') || t.includes('seismic')) return 'earthquake';
+  if (t.includes('cyclone') || t.includes('storm') || t.includes('hurricane') || t.includes('typhoon')) return 'cyclone';
+  if (t.includes('landslide')) return 'landslide';
+  if (t.includes('drought')) return 'drought';
+  return 'other';
+};
+
+const createDisasterIcon = (severity = 'low', type = 'disaster') => {
+  const normalized = normalizeDisasterType(type);
+  const meta = DISASTER_ICON_META[normalized] || DISASTER_ICON_META.other;
+  const severityRing = severity === 'extreme' || severity === 'high' ? '#DC2626'
+    : severity === 'moderate' ? '#EA580C'
+    : '#1D4ED8';
+
+  return createFlaticonPin({
+    iconUrl: FLATICON_ICONS[meta.iconKey],
+    fallbackLabel: meta.label,
+    background: meta.color,
+    ringColor: severityRing,
+    size: 34,
+    pinShape: false,
+  });
+};
+
+const SERVICE_ICON_META = {
+  hospital: { label: 'H', color: '#DC2626', iconKey: 'hospital' },
+  police: { label: 'P', color: '#1D4ED8', iconKey: 'police' },
+  fire_station: { label: 'F', color: '#EA580C', iconKey: 'fire_station' },
+  disaster_management_center: { label: 'DM', color: '#7C3AED', iconKey: 'disaster_management_center' },
+  emergency_center: { label: 'E', color: '#0EA5E9', iconKey: 'emergency_center' },
+  help_center: { label: '?', color: '#16A34A', iconKey: 'help_center' },
+};
+
+const createEmergencyServiceIcon = (serviceType = 'help_center') => {
+  const meta = SERVICE_ICON_META[serviceType] || SERVICE_ICON_META.help_center;
+  return createFlaticonPin({
+    iconUrl: FLATICON_ICONS[meta.iconKey],
+    fallbackLabel: meta.label,
+    background: meta.color,
+    ringColor: meta.color,
+    size: 32,
+    pinShape: true,
   });
 };
 
@@ -212,7 +321,18 @@ function MapRecenter({ center, searchRadius }) {
   return null;
 }
 
-const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, searchRadius, alerts, disasters }) => {
+function MapInteractionSync({ onMapMoved }) {
+  useMapEvents({
+    moveend: (event) => {
+      if (!onMapMoved) return;
+      const c = event.target.getCenter();
+      onMapMoved([c.lat, c.lng]);
+    },
+  });
+  return null;
+}
+
+const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, searchRadius, alerts, disasters, emergencyServices, onMapMoved }) => {
   const [mapCenter, setMapCenter] = useState(center || [20.5937, 78.9629]); // Default: India
 
   useEffect(() => {
@@ -229,6 +349,7 @@ const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, se
       className="rounded-lg"
     >
       <MapRecenter center={mapCenter} searchRadius={searchRadius} />
+      <MapInteractionSync onMapMoved={onMapMoved} />
       
       {/* Base Map Layer */}
       <TileLayer
@@ -389,11 +510,11 @@ const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, se
 
       {/* Alert Markers */}
       {alerts && alerts.length > 0 && alerts.map((alert, index) => {
-        const lat = alert.coordinates?.lat || alert.position?.lat;
-        const lon = alert.coordinates?.lon || alert.coordinates?.lng || alert.position?.lng || alert.position?.lon;
-        if (!lat || !lon || isNaN(lat) || isNaN(lon)) return null;
+        const lat = Number(alert.coordinates?.lat ?? alert.position?.lat ?? alert.lat);
+        const lon = Number(alert.coordinates?.lon ?? alert.coordinates?.lng ?? alert.position?.lng ?? alert.position?.lon ?? alert.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
         return (
-          <Marker key={`alert-${alert.id || index}`} position={[lat, lon]} icon={createAlertIcon(alert.severity)}>
+          <Marker key={`alert-${alert.id || index}`} position={[lat, lon]} icon={createAlertIcon(alert)} zIndexOffset={900}>
             <Tooltip direction="top" offset={[0, -10]} opacity={0.95}>
               <div className="text-xs">
                 <div><strong>{alert.title || alert.type || 'Alert'}</strong></div>
@@ -422,6 +543,7 @@ const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, se
             key={`disaster-${d.id || index}`}
             position={[lat, lon]}
             icon={createDisasterIcon(d.severity, d.type)}
+            zIndexOffset={700}
           >
             <Tooltip direction="top" offset={[0, -10]} opacity={0.95}>
               <div className="text-xs">
@@ -439,6 +561,44 @@ const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, se
                 {d.location && <><span><strong>Location:</strong> {d.location}</span><br /></>}
                 {d.date && <><span><strong>Date:</strong> {d.date}</span><br /></>}
                 {d.description || ''}
+              </div>
+            </Popup>
+          </Marker>
+        );
+      })}
+
+      {/* Emergency Services Markers */}
+      {showLayers?.emergencyServices && emergencyServices && emergencyServices.length > 0 && emergencyServices.map((s, index) => {
+        const lat = Number(s.lat);
+        const lon = Number(s.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+        return (
+          <Marker
+            key={`service-${s.id || index}`}
+            position={[lat, lon]}
+            icon={createEmergencyServiceIcon(s.service_type)}
+            zIndexOffset={600}
+          >
+            <Tooltip direction="top" offset={[0, -10]} opacity={0.95}>
+              <div className="text-xs">
+                <div><strong>{s.name || 'Emergency Service'}</strong></div>
+                <div>{String(s.service_type || 'help_center').replace(/_/g, ' ')}</div>
+              </div>
+            </Tooltip>
+            <Popup>
+              <div className="text-sm">
+                <strong>{s.name || 'Emergency Service'}</strong>
+                <br />
+                <span><strong>Type:</strong> {String(s.service_type || 'help_center').replace(/_/g, ' ')}</span>
+                <br />
+                {typeof s.distance_km === 'number' && (
+                  <>
+                    <span><strong>Distance:</strong> {s.distance_km.toFixed(2)} km</span>
+                    <br />
+                  </>
+                )}
+                {s.address && <><span><strong>Address:</strong> {s.address}</span><br /></>}
+                {s.source && <span><strong>Source:</strong> {s.source}</span>}
               </div>
             </Popup>
           </Marker>

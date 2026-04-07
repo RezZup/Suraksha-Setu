@@ -46,6 +46,12 @@ export default function TelegramLinking({ userId, firebaseToken, currentChatId }
       return;
     }
 
+    const token = firebaseToken || localStorage.getItem('auth_token') || '';
+    if (!token) {
+      setError('Please sign in again, then retry linking your Telegram Chat ID');
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -54,6 +60,11 @@ export default function TelegramLinking({ userId, firebaseToken, currentChatId }
         {
           chat_id: chatId.trim(),
           firebase_token: firebaseToken,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
         }
       );
 

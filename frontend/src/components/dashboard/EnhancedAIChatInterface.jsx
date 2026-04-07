@@ -91,13 +91,14 @@ const EnhancedAIChatInterface = () => {
     }
   }, []);
 
-  const handleSendMessage = async () => {
-    if (!inputValue.trim() || isLoading) return;
+  const handleSendMessage = async (overrideText = null) => {
+    const content = String(overrideText ?? inputValue).trim();
+    if (!content || isLoading) return;
 
     const userMessage = {
       id: Date.now(),
       type: 'user',
-      text: inputValue.trim(),
+      text: content,
       timestamp: new Date(),
     };
 
@@ -110,8 +111,8 @@ const EnhancedAIChatInterface = () => {
       setDetectedLanguage(detectedLang);
 
       const response = await axios.post(`${API_URL}/ai/chat`, {
-        message: userMessage.text,
-        query: userMessage.text,
+        message: content,
+        query: content,
         role: 'citizen',
         language: detectedLang,
         locale: detectedLang,
@@ -145,6 +146,21 @@ const EnhancedAIChatInterface = () => {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const clearConversation = () => {
+    setMessages([
+      {
+        id: Date.now(),
+        type: 'bot',
+        text: 'Conversation cleared. Ask your next question about weather, alerts, emergency response, or preparedness.',
+        timestamp: new Date(),
+      },
+    ]);
+    setInputValue('');
+    setLiveTranscript('');
+    if (isSpeaking) stopSpeaking();
+    if (isRecording) stopRecording();
   };
 
   // Voice Recording
@@ -549,7 +565,7 @@ const EnhancedAIChatInterface = () => {
   };
 
   return (
-    <Card className={`w-full ${isExpanded ? 'h-[700px]' : 'h-[550px]'} flex flex-col shadow-xl border border-cyan-200/40 dark:border-cyan-900/40 overflow-hidden transition-all duration-300 bg-gradient-to-b from-slate-50 to-white dark:from-slate-900 dark:to-slate-950`}>
+    <Card className={`w-full ${isExpanded ? 'h-[78vh] min-h-[620px]' : 'h-[560px] md:h-[600px]'} flex flex-col shadow-xl border border-cyan-200/40 dark:border-cyan-900/40 overflow-hidden transition-all duration-300 bg-gradient-to-b from-slate-50 to-white dark:from-slate-900 dark:to-slate-950`}>
       {/* Immersive Header */}
       <CardHeader className="bg-gradient-to-r from-slate-900 via-cyan-900 to-emerald-900 text-white border-b border-white/10 pb-3 pt-3 px-4 shrink-0">
         <div className="flex items-center justify-between">
@@ -591,6 +607,14 @@ const EnhancedAIChatInterface = () => {
             >
               <Volume2 className="h-4 w-4" />
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={clearConversation}
+              className="h-8 px-2 text-[11px] text-slate-300 hover:text-white rounded-lg"
+            >
+              New
+            </Button>
             {isSpeaking && (
               <Button
                 variant="ghost"
@@ -626,7 +650,7 @@ const EnhancedAIChatInterface = () => {
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.97 }}
                   transition={{ delay: i * 0.03 }}
-                  onClick={() => setInputValue(prompt.text)}
+                  onClick={() => handleSendMessage(prompt.text)}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-semibold whitespace-nowrap transition-all border shadow-sm ${
                     i % 2 === 0
                       ? 'bg-cyan-50 text-cyan-900 border-cyan-200 hover:bg-cyan-100 dark:bg-cyan-950/30 dark:text-cyan-100 dark:border-cyan-900'
@@ -638,6 +662,11 @@ const EnhancedAIChatInterface = () => {
                 </motion.button>
               ))}
             </AnimatePresence>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] text-muted-foreground">
+            <span className="px-2 py-0.5 rounded-full bg-muted/70 border">Messages: {messages.length}</span>
+            <span className="px-2 py-0.5 rounded-full bg-muted/70 border">Language: {detectedLanguage}</span>
+            <span className="px-2 py-0.5 rounded-full bg-muted/70 border">Voice: {voiceMode ? 'On' : 'Off'}</span>
           </div>
         </div>
 
@@ -694,6 +723,9 @@ const EnhancedAIChatInterface = () => {
             placeholder="Ask Suraksha AI..."
             disabled={isLoading}
           />
+          <p className="mt-2 text-[11px] text-muted-foreground text-center">
+            Press Enter to send. Use voice hold mode for quicker field updates.
+          </p>
         </div>
       </CardContent>
     </Card>

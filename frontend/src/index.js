@@ -4,6 +4,7 @@ import "@/index.css";
 import App from "@/App";
 import { registerServiceWorker } from './utils/notifications';
 import './i18n'; // Initialize i18n
+import './bones/registry';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(

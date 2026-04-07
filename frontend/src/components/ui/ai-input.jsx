@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Mic, Paperclip, X, CornerDownLeft, Globe, Sparkles } from 'lucide-react';
+import { Send, Mic, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils'; // Assuming utils exists, or simple replacement
@@ -38,7 +38,7 @@ const AIInput = ({
 
     return (
         <div className={cn(
-            "relative group transition-all duration-200 rounded-2xl p-2",
+            "relative group transition-all duration-200 rounded-2xl p-2.5",
             "bg-card",
             "border border-border",
             isFocused && "border-foreground/30",
@@ -46,17 +46,8 @@ const AIInput = ({
         )}>
             <div className="relative flex items-end gap-2">
 
-                {/* Attachment Button (Visual) */}
-                <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-10 w-10 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                >
-                    <Paperclip className="h-5 w-5" />
-                </Button>
-
                 {/* Text Area */}
-                <div className="flex-1 min-h-[44px] py-2">
+                <div className="flex-1 min-h-[44px] py-1">
                     <textarea
                         ref={textareaRef}
                         value={value}
@@ -67,6 +58,7 @@ const AIInput = ({
                         placeholder={placeholder}
                         disabled={disabled}
                         rows={1}
+                        maxLength={700}
                         className="w-full bg-transparent border-none focus:ring-0 p-0 text-base placeholder:text-muted-foreground text-foreground resize-none max-h-[200px] scrollbar-hide"
                         style={{ minHeight: '24px' }}
                     />
@@ -75,7 +67,7 @@ const AIInput = ({
                 {/* Right Actions */}
                 <div className="flex items-center gap-1 pb-0.5">
                     {/* Voice Mode Toggle */}
-                    <div className="hidden sm:flex items-center gap-1 mr-1">
+                    <div className="flex items-center gap-1 mr-1">
                         <Button
                             type="button"
                             variant="ghost"
@@ -87,6 +79,7 @@ const AIInput = ({
                                     ? "bg-primary/10 text-primary"
                                     : "text-muted-foreground"
                             )}
+                            title="Toggle recording mode"
                         >
                             Toggle
                         </Button>
@@ -101,6 +94,7 @@ const AIInput = ({
                                     ? "bg-primary/10 text-primary"
                                     : "text-muted-foreground"
                             )}
+                            title="Push-to-talk mode"
                         >
                             Hold
                         </Button>
@@ -152,10 +146,15 @@ const AIInput = ({
                         {isLoading ? (
                             <Sparkles className="h-5 w-5 animate-spin" />
                         ) : (
-                            <CornerDownLeft className="h-5 w-5" />
+                            <Send className="h-5 w-5" />
                         )}
                     </Button>
                 </div>
+            </div>
+
+            <div className="mt-1 flex items-center justify-between px-1 text-[11px] text-muted-foreground">
+                <span>{voiceInputMode === 'ptt' ? 'Hold mic to record' : 'Tap mic to start/stop'}</span>
+                <span>{String(value || '').trim().length}/700</span>
             </div>
 
             {/* Helper Text / Mode Indicator */}

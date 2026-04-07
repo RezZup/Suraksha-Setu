@@ -3,7 +3,7 @@ Admin API Routes for Alert Management, Users & Stats
 """
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from database import get_db, Alert, IncidentLog, User, CommunityReport, CommunityPost, AILog, UserReport
 from notifications import ws_manager
 from sqlalchemy import select, func
@@ -419,6 +419,256 @@ class TelegramTestRequest(BaseModel):
 class TelegramBroadcastRequest(BaseModel):
     message: str
     alert_id: Optional[str] = None  # if set, format as an alert card
+
+
+class MultiChannelBroadcastRequest(BaseModel):
+    title: Optional[str] = "Admin Broadcast"
+    message: str
+    severity: Optional[str] = "warning"
+    alert_type: Optional[str] = "admin_update"
+    alert_id: Optional[str] = None
+    channels: List[str] = ["telegram"]
+
+
+@router.get("/broadcast/channels")
+async def broadcast_channel_stats(db=Depends(get_db)):
+    """Return available broadcast channels and recipient counts for admin UI."""
+    telegram_service = None
+    sms_service = None
+    email_service = None
+    push_subscriptions = 0
+    ws_clients = len(ws_manager.active_connections)
+
+    try:
+        from telegram_service import telegram_service as _tg_service
+        telegram_service = _tg_service
+    except Exception:
+        telegram_service = None
+
+    try:
+        from sms_service import sms_service as _sms_service
+        sms_service = _sms_service
+    except Exception:
+        sms_service = None
+
+    try:
+        from email_service import email_service as _email_service
+        email_service = _email_service
+    except Exception:
+        email_service = None
+
+    try:
+        from notifications import push_manager
+        push_subscriptions = len(getattr(push_manager, "subscriptions", []) or [])
+    except Exception:
+        push_subscriptions = 0
+
+    tg_q = await db.execute(
+        select(func.count(User.id)).where(User.telegram_chat_id.isnot(None), User.is_active == True)
+    )
+    sms_q = await db.execute(
+        select(func.count(User.id)).where(User.phone.isnot(None), User.is_active == True)
+    )
+    email_q = await db.execute(
+        select(func.count(User.id)).where(User.notification_email.isnot(None), User.is_active == True)
+    )
+
+    return {
+        "telegram": {
+            "enabled": bool(getattr(telegram_service, "enabled", False)),
+            "recipients": int(tg_q.scalar() or 0),
+        },
+        "sms": {
+            "enabled": sms_service is not None,
+            "live": bool(getattr(sms_service, "is_available", False)) if sms_service else False,
+            "recipients": int(sms_q.scalar() or 0),
+        },
+        "email": {
+            "enabled": bool(getattr(email_service, "enabled", False)) if email_service else False,
+            "recipients": int(email_q.scalar() or 0),
+        },
+        "push": {
+            "enabled": True,
+            "recipients": push_subscriptions,
+        },
+        "websocket": {
+            "enabled": True,
+            "recipients": ws_clients,
+        },
+    }
+
+
+@router.post("/broadcast/multi-channel")
+async def admin_multi_channel_broadcast(body: MultiChannelBroadcastRequest, db=Depends(get_db), _admin=Depends(verify_firebase_token)):
+    """Broadcast one admin message across selected channels (telegram/sms/email/push/websocket)."""
+    selected_channels = {c.strip().lower() for c in (body.channels or []) if c and c.strip()}
+    allowed_channels = {"telegram", "sms", "email", "push", "websocket"}
+    selected_channels = selected_channels.intersection(allowed_channels)
+
+    if not selected_channels:
+        raise HTTPException(status_code=422, detail="At least one valid channel is required")
+
+    selected_alert = None
+    if body.alert_id:
+        selected_alert = await db.get(Alert, body.alert_id)
+        if not selected_alert:
+            raise HTTPException(status_code=404, detail="Alert not found for alert_id")
+
+    title = (body.title or "").strip() or (selected_alert.title if selected_alert else "Admin Broadcast")
+    severity = (body.severity or "").strip() or (selected_alert.severity if selected_alert else "warning")
+    alert_type = (body.alert_type or "").strip() or (selected_alert.alert_type if selected_alert else "admin_update")
+    raw_location = selected_alert.location if selected_alert else {}
+    location_data = raw_location if isinstance(raw_location, dict) else {}
+    message_text = (body.message or "").strip() or (selected_alert.description if selected_alert else "")
+
+    if not message_text:
+        raise HTTPException(status_code=422, detail="Message is required")
+
+    payload = {
+        "type": "admin_broadcast",
+        "title": title,
+        "description": message_text,
+        "alert_type": alert_type,
+        "severity": severity,
+        "source": "admin",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "location": location_data or {},
+    }
+
+    results: Dict[str, Any] = {}
+
+    if "telegram" in selected_channels:
+        try:
+            from telegram_service import telegram_service
+            if not telegram_service.enabled:
+                results["telegram"] = {"enabled": False, "sent": 0, "total": 0, "failed": 0, "error": "Telegram bot not configured"}
+            else:
+                q = await db.execute(select(User).where(User.telegram_chat_id.isnot(None), User.is_active == True))
+                users = [u for u in q.scalars().all() if (u.notification_channels or {}).get("telegram", True)]
+
+                if selected_alert:
+                    tg_text = telegram_service._format_alert({
+                        "title": selected_alert.title,
+                        "severity": selected_alert.severity,
+                        "description": selected_alert.description,
+                        "location": selected_alert.location or {},
+                    })
+                else:
+                    tg_text = f"📢 <b>{title}</b>\n\n{message_text[:3900]}\n\n<i>— Suraksha Setu</i>"
+
+                import asyncio
+                tg_tasks = [telegram_service.send_message(u.telegram_chat_id, tg_text) for u in users]
+                tg_res = await asyncio.gather(*tg_tasks, return_exceptions=True)
+                tg_sent = sum(1 for r in tg_res if r is True)
+                results["telegram"] = {
+                    "enabled": True,
+                    "sent": tg_sent,
+                    "total": len(users),
+                    "failed": max(0, len(users) - tg_sent),
+                }
+        except Exception as e:
+            results["telegram"] = {"enabled": False, "sent": 0, "total": 0, "failed": 0, "error": str(e)}
+
+    if "sms" in selected_channels:
+        try:
+            from sms_service import sms_service
+            q = await db.execute(select(User).where(User.phone.isnot(None), User.is_active == True))
+            users = [u for u in q.scalars().all() if (u.notification_channels or {}).get("sms", True)]
+            phone_numbers = sorted({str(u.phone).strip() for u in users if u.phone})
+
+            sms_text = f"{title}: {message_text}".strip()
+            sms_text = sms_text[:550]
+
+            import asyncio
+            sms_tasks = [sms_service.send_sms(phone, sms_text) for phone in phone_numbers]
+            sms_res = await asyncio.gather(*sms_tasks, return_exceptions=True)
+            sms_sent = sum(1 for r in sms_res if isinstance(r, dict) and r.get("success"))
+
+            results["sms"] = {
+                "enabled": True,
+                "live": bool(getattr(sms_service, "is_available", False)),
+                "sent": sms_sent,
+                "total": len(phone_numbers),
+                "failed": max(0, len(phone_numbers) - sms_sent),
+            }
+        except Exception as e:
+            results["sms"] = {"enabled": False, "sent": 0, "total": 0, "failed": 0, "error": str(e)}
+
+    if "email" in selected_channels:
+        try:
+            from email_service import email_service
+            if not email_service.enabled:
+                results["email"] = {"enabled": False, "sent": 0, "total": 0, "failed": 0, "error": "Email service not configured"}
+            else:
+                q = await db.execute(select(User).where(User.notification_email.isnot(None), User.is_active == True))
+                users = [u for u in q.scalars().all() if (u.notification_channels or {}).get("email", True)]
+
+                email_alert = {
+                    "title": title,
+                    "severity": severity,
+                    "description": message_text,
+                    "location": location_data or {"city": "India", "state": ""},
+                    "source": "Suraksha Setu Admin",
+                }
+
+                import asyncio
+                email_tasks = [
+                    email_service.send_alert_email(
+                        u.notification_email,
+                        u.full_name or u.username or "",
+                        email_alert,
+                    )
+                    for u in users
+                ]
+                email_res = await asyncio.gather(*email_tasks, return_exceptions=True)
+                email_sent = sum(1 for r in email_res if r is True)
+
+                results["email"] = {
+                    "enabled": True,
+                    "sent": email_sent,
+                    "total": len(users),
+                    "failed": max(0, len(users) - email_sent),
+                }
+        except Exception as e:
+            results["email"] = {"enabled": False, "sent": 0, "total": 0, "failed": 0, "error": str(e)}
+
+    if "push" in selected_channels:
+        try:
+            from notifications import push_manager
+            push_total = len(getattr(push_manager, "subscriptions", []) or [])
+            push_sent = await push_manager.broadcast_notification(payload)
+            results["push"] = {
+                "enabled": True,
+                "sent": int(push_sent or 0),
+                "total": int(push_total),
+                "failed": max(0, int(push_total) - int(push_sent or 0)),
+            }
+        except Exception as e:
+            results["push"] = {"enabled": False, "sent": 0, "total": 0, "failed": 0, "error": str(e)}
+
+    if "websocket" in selected_channels:
+        try:
+            ws_total = len(ws_manager.active_connections)
+            await ws_manager.broadcast(payload)
+            results["websocket"] = {
+                "enabled": True,
+                "sent": int(ws_total),
+                "total": int(ws_total),
+                "failed": 0,
+            }
+        except Exception as e:
+            results["websocket"] = {"enabled": False, "sent": 0, "total": 0, "failed": 0, "error": str(e)}
+
+    total_sent = sum(int(v.get("sent", 0)) for v in results.values())
+    return {
+        "success": True,
+        "title": title,
+        "message": message_text,
+        "channels": sorted(list(selected_channels)),
+        "results": results,
+        "total_sent": total_sent,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.get("/telegram/stats")

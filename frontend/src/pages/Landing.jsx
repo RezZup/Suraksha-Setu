@@ -12,6 +12,7 @@ import {
   Target
 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { Skeleton } from 'boneyard-js/react';
 
 const Landing = () => {
   const navigate = useNavigate();
@@ -88,6 +89,7 @@ const Landing = () => {
       </nav>
 
       {/* Hero Section */}
+      <Skeleton name="landing-hero" loading={false}>
       <section className="relative overflow-hidden py-24 px-4">
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_#f8fafc,_#ffffff)]"></div>
         <div className="max-w-6xl mx-auto relative">
@@ -149,6 +151,7 @@ const Landing = () => {
           </motion.div>
         </div>
       </section>
+      </Skeleton>
 
       {/* Features Section */}
       <section className="py-20 px-4 bg-white">

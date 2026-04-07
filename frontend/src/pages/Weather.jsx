@@ -28,6 +28,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line, BarChart, Bar, Legend, ComposedChart } from 'recharts';
 import { getWeatherByLocation, getAQIByLocation } from '@/services/weatherApi';
 import axios from 'axios';
@@ -35,13 +36,18 @@ import axios from 'axios';
 const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
 const Weather = () => {
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [location, setLocation] = useState('');
   const [weatherData, setWeatherData] = useState(null);
   const [aqiData, setAQIData] = useState(null);
   const [aqiHistory, setAQIHistory] = useState(null);
   const [error, setError] = useState(null);
   const [currentLocation, setCurrentLocation] = useState(null);
+
+  const parseNumber = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
 
   // Quick access cities for India
   const quickAccessCities = [
@@ -204,9 +210,9 @@ const Weather = () => {
     const startIndex = currentHourIndex >= 0 ? currentHourIndex : 0;
     return weatherData.hourly.slice(startIndex, startIndex + 24).map((hour) => ({
       time: new Date(hour.time).toLocaleTimeString('en-US', { hour: 'numeric', hour12: true }),
-      temp: Math.round(hour.temp || hour.temperature || 0),
-      rain: Math.round(hour.rain || 0),
-      humidity: Math.round(hour.humidity || 0)
+      temp: parseNumber(hour.temp ?? hour.temperature) != null ? Math.round(parseNumber(hour.temp ?? hour.temperature)) : null,
+      rain: parseNumber(hour.rain) != null ? Math.round(parseNumber(hour.rain)) : null,
+      humidity: parseNumber(hour.humidity) != null ? Math.round(parseNumber(hour.humidity)) : null
     }));
   })();
 
@@ -224,22 +230,53 @@ const Weather = () => {
   const forecast = weatherData?.daily?.slice(0, 7).map((day, index) => ({
     day: index === 0 ? 'Today' : new Date(day.date || day.time).toLocaleDateString('en-US', { weekday: 'short' }),
     icon: getWeatherIcon(day.weather_code),
-    temp: `${Math.round(day.high || day.temperature_max || 0)}°`,
-    tempLow: `${Math.round(day.low || day.temperature_min || 0)}°`,
-    status: day.condition || 'Clear'
+    temp: parseNumber(day.high ?? day.temperature_max) != null ? `${Math.round(parseNumber(day.high ?? day.temperature_max))}°` : '--',
+    tempLow: parseNumber(day.low ?? day.temperature_min) != null ? `${Math.round(parseNumber(day.low ?? day.temperature_min))}°` : '--',
+    status: day.condition || 'N/A'
   })) || [];
 
   const current = weatherData?.current || {};
-  const currentTemp = Number.isFinite(current.temperature) ? Math.round(current.temperature) : null;
-  const feelsLike = Number.isFinite(current.apparent_temperature) ? Math.round(current.apparent_temperature) : null;
-  const humidity = Number.isFinite(current.humidity) ? Math.round(current.humidity) : null;
-  const windSpeed = Number.isFinite(current.wind_speed) ? Math.round(current.wind_speed) : null;
-  const windDirection = current.wind_direction || '--';
-  const pressure = Number.isFinite(current.pressure) ? Math.round(current.pressure) : null;
+  const hasWeatherData = Boolean(weatherData?.current);
+  const showWeatherSkeleton = loading || !hasWeatherData;
+  const currentTemp = parseNumber(current.temperature) != null ? Math.round(parseNumber(current.temperature)) : null;
+  const feelsLike = parseNumber(current.apparent_temperature) != null ? Math.round(parseNumber(current.apparent_temperature)) : null;
+  const humidity = parseNumber(current.humidity) != null ? Math.round(parseNumber(current.humidity)) : null;
+  const windSpeed = parseNumber(current.wind_speed) != null ? Math.round(parseNumber(current.wind_speed)) : null;
+  const windDirection = parseNumber(current.wind_direction);
+  const pressure = parseNumber(current.pressure) != null ? Math.round(parseNumber(current.pressure)) : null;
   const aqiValue = aqiData?.aqi ?? aqiData?.current?.aqi ?? null;
   const aqiStatus = aqiData?.aqi_label || aqiData?.current?.category || 'N/A';
-  const pm25 = aqiData?.pm25 ?? aqiData?.current?.pm25 ?? null;
-  const pm10 = aqiData?.pm10 ?? aqiData?.current?.pm10 ?? null;
+  const pm25 = parseNumber(aqiData?.pm25 ?? aqiData?.current?.pm25);
+  const pm10 = parseNumber(aqiData?.pm10 ?? aqiData?.current?.pm10);
+  const uvIndex = parseNumber(current.uv_index);
+  const precipitation = parseNumber(current.rain ?? current.precipitation);
+  const visibility = parseNumber(current.visibility);
+  const cloudCover = parseNumber(current.cloud_cover);
+  const sunriseText = weatherData?.daily?.[0]?.sunrise
+    ? new Date(weatherData.daily[0].sunrise).toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      })
+    : '--';
+  const sunsetText = weatherData?.daily?.[0]?.sunset
+    ? new Date(weatherData.daily[0].sunset).toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      })
+    : '--';
+  const windDirectionLabel = (() => {
+    if (windDirection == null) return 'N/A';
+    if (windDirection >= 337.5 || windDirection < 22.5) return 'North';
+    if (windDirection >= 22.5 && windDirection < 67.5) return 'Northeast';
+    if (windDirection >= 67.5 && windDirection < 112.5) return 'East';
+    if (windDirection >= 112.5 && windDirection < 157.5) return 'Southeast';
+    if (windDirection >= 157.5 && windDirection < 202.5) return 'South';
+    if (windDirection >= 202.5 && windDirection < 247.5) return 'Southwest';
+    if (windDirection >= 247.5 && windDirection < 292.5) return 'West';
+    return 'Northwest';
+  })();
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -327,9 +364,24 @@ const Weather = () => {
               )}
             </div>
 
-            {loading ? (
-              <div className="mt-8 flex items-center justify-center py-16">
-                <Loader2 className="w-12 h-12 animate-spin" />
+            {showWeatherSkeleton ? (
+              <div className="mt-8 space-y-6">
+                <div className="flex items-end gap-6">
+                  <Skeleton className="h-20 w-36 bg-white/20" />
+                  <div className="space-y-2">
+                    <Skeleton className="h-6 w-48 bg-white/20" />
+                    <Skeleton className="h-4 w-36 bg-white/20" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {Array.from({ length: 4 }).map((_, idx) => (
+                    <div key={idx} className="bg-white/10 rounded-xl p-3">
+                      <Skeleton className="h-4 w-16 bg-white/20 mb-2" />
+                      <Skeleton className="h-8 w-14 bg-white/20 mb-1" />
+                      <Skeleton className="h-3 w-20 bg-white/20" />
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : (
               <>
@@ -354,7 +406,7 @@ const Weather = () => {
                       <Wind className="w-4 h-4" /> Wind
                     </div>
                     <div className="text-2xl font-bold">{windSpeed != null ? windSpeed : '--'}</div>
-                    <div className="text-xs text-blue-200">km/h {windDirection}</div>
+                    <div className="text-xs text-blue-200">km/h {windDirection != null ? windDirection : '--'}°</div>
                   </motion.div>
                   <motion.div
                     initial={{ opacity: 0, y: 20 }}
@@ -389,7 +441,7 @@ const Weather = () => {
                     <div className="flex items-center gap-2 text-blue-100 mb-1">
                       <Eye className="w-4 h-4" /> Visibility
                     </div>
-                    <div className="text-2xl font-bold">{Number.isFinite(current.visibility) ? current.visibility : '--'}</div>
+                    <div className="text-2xl font-bold">{visibility != null ? visibility : '--'}</div>
                     <div className="text-xs text-blue-200">km</div>
                   </motion.div>
                 </div>
@@ -407,9 +459,14 @@ const Weather = () => {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {loading ? (
-              <div className="flex items-center justify-center py-16">
-                <Loader2 className="w-8 h-8 animate-spin" />
+            {showWeatherSkeleton ? (
+              <div className="space-y-4 py-4">
+                <div className="flex justify-center">
+                  <Skeleton className="h-36 w-36 rounded-full" />
+                </div>
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-16 w-full" />
               </div>
             ) : (
               <>
@@ -764,22 +821,31 @@ const Weather = () => {
         >
           <Card className="hover:shadow-lg transition-all hover:-translate-y-1 border-orange-200 dark:border-orange-800 bg-gradient-to-br from-orange-50 to-amber-50 dark:from-orange-950/20 dark:to-amber-950/20">
             <CardContent className="p-4">
+              {showWeatherSkeleton ? (
+                <div className="space-y-2">
+                  <Skeleton className="h-3 w-20" />
+                  <Skeleton className="h-8 w-14" />
+                  <Skeleton className="h-3 w-24" />
+                </div>
+              ) : (
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <p className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
                     <Sun className="w-3 h-3" /> UV Index
                   </p>
-                  <p className="text-3xl font-bold text-orange-600">{current.uv_index || 5}</p>
+                  <p className="text-3xl font-bold text-orange-600">{uvIndex != null ? uvIndex : '--'}</p>
                   <p className="text-xs font-semibold text-orange-600 mt-1">
-                    {(current.uv_index || 5) <= 2 ? '🟢 Low' : 
-                     (current.uv_index || 5) <= 5 ? '🟡 Moderate' :
-                     (current.uv_index || 5) <= 7 ? '🟠 High' : '🔴 Very High'}
+                    {uvIndex == null ? 'N/A' :
+                     uvIndex <= 2 ? '🟢 Low' : 
+                     uvIndex <= 5 ? '🟡 Moderate' :
+                     uvIndex <= 7 ? '🟠 High' : '🔴 Very High'}
                   </p>
                 </div>
                 <div className="p-2 bg-orange-500/20 rounded-xl">
                   <Sun className="w-6 h-6 text-orange-600" />
                 </div>
               </div>
+              )}
             </CardContent>
           </Card>
         </motion.div>
@@ -791,18 +857,26 @@ const Weather = () => {
         >
           <Card className="hover:shadow-lg transition-all hover:-translate-y-1 border-blue-200 dark:border-blue-800 bg-gradient-to-br from-blue-50 to-cyan-50 dark:from-blue-950/20 dark:to-cyan-950/20">
             <CardContent className="p-4">
+              {showWeatherSkeleton ? (
+                <div className="space-y-2">
+                  <Skeleton className="h-3 w-24" />
+                  <Skeleton className="h-8 w-12" />
+                  <Skeleton className="h-3 w-20" />
+                </div>
+              ) : (
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <p className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
                     <CloudDrizzle className="w-3 h-3" /> Precipitation
                   </p>
-                  <p className="text-3xl font-bold text-blue-600">{current.rain || current.precipitation || 0}</p>
+                  <p className="text-3xl font-bold text-blue-600">{precipitation != null ? precipitation : '--'}</p>
                   <p className="text-xs font-semibold text-blue-600 mt-1">mm / Last hour</p>
                 </div>
                 <div className="p-2 bg-blue-500/20 rounded-xl">
                   <Droplets className="w-6 h-6 text-blue-600" />
                 </div>
               </div>
+              )}
             </CardContent>
           </Card>
         </motion.div>
@@ -814,21 +888,30 @@ const Weather = () => {
         >
           <Card className="hover:shadow-lg transition-all hover:-translate-y-1 border-purple-200 dark:border-purple-800 bg-gradient-to-br from-purple-50 to-fuchsia-50 dark:from-purple-950/20 dark:to-fuchsia-950/20">
             <CardContent className="p-4">
+              {showWeatherSkeleton ? (
+                <div className="space-y-2">
+                  <Skeleton className="h-3 w-20" />
+                  <Skeleton className="h-8 w-16" />
+                  <Skeleton className="h-3 w-24" />
+                </div>
+              ) : (
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <p className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
                     <Eye className="w-3 h-3" /> Visibility
                   </p>
-                  <p className="text-3xl font-bold text-purple-600">{current.visibility || 10}</p>
+                  <p className="text-3xl font-bold text-purple-600">{visibility != null ? visibility : '--'}</p>
                   <p className="text-xs font-semibold text-purple-600 mt-1">
-                    {(current.visibility || 10) >= 10 ? '👁️ Clear' : 
-                     (current.visibility || 10) >= 5 ? '😶‍🌫️ Moderate' : '🌫️ Poor'} km
+                    {visibility == null ? 'N/A' :
+                     visibility >= 10 ? '👁️ Clear' : 
+                     visibility >= 5 ? '😶‍🌫️ Moderate' : '🌫️ Poor'} km
                   </p>
                 </div>
                 <div className="p-2 bg-purple-500/20 rounded-xl">
                   <Eye className="w-6 h-6 text-purple-600" />
                 </div>
               </div>
+              )}
             </CardContent>
           </Card>
         </motion.div>
@@ -840,21 +923,30 @@ const Weather = () => {
         >
           <Card className="hover:shadow-lg transition-all hover:-translate-y-1 border-slate-200 dark:border-slate-800 bg-gradient-to-br from-slate-50 to-gray-50 dark:from-slate-950/20 dark:to-gray-950/20">
             <CardContent className="p-4">
+              {showWeatherSkeleton ? (
+                <div className="space-y-2">
+                  <Skeleton className="h-3 w-24" />
+                  <Skeleton className="h-8 w-14" />
+                  <Skeleton className="h-3 w-20" />
+                </div>
+              ) : (
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <p className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
                     <CloudFog className="w-3 h-3" /> Cloud Cover
                   </p>
-                  <p className="text-3xl font-bold text-slate-600">{current.cloud_cover || 0}</p>
+                  <p className="text-3xl font-bold text-slate-600">{cloudCover != null ? cloudCover : '--'}</p>
                   <p className="text-xs font-semibold text-slate-600 mt-1">
-                    {(current.cloud_cover || 0) <= 25 ? '☀️ Clear' :
-                     (current.cloud_cover || 0) <= 75 ? '⛅ Partly' : '☁️ Cloudy'} %
+                    {cloudCover == null ? 'N/A' :
+                     cloudCover <= 25 ? '☀️ Clear' :
+                     cloudCover <= 75 ? '⛅ Partly' : '☁️ Cloudy'} %
                   </p>
                 </div>
                 <div className="p-2 bg-slate-500/20 rounded-xl">
                   <CloudFog className="w-6 h-6 text-slate-600" />
                 </div>
               </div>
+              )}
             </CardContent>
           </Card>
         </motion.div>
@@ -879,26 +971,12 @@ const Weather = () => {
                 <div className="text-center p-4 bg-white/50 dark:bg-black/20 rounded-xl">
                   <Sunrise className="w-8 h-8 text-amber-500 mx-auto mb-2" />
                   <p className="text-xs text-muted-foreground mb-1">Sunrise</p>
-                  <p className="text-xl font-bold text-amber-600">
-                    {weatherData?.daily?.[0]?.sunrise ? 
-                      new Date(weatherData.daily[0].sunrise).toLocaleTimeString('en-US', {
-                        hour: 'numeric',
-                        minute: '2-digit',
-                        hour12: true
-                      }) : '6:30 AM'}
-                  </p>
+                  {showWeatherSkeleton ? <Skeleton className="h-6 w-20 mx-auto" /> : <p className="text-xl font-bold text-amber-600">{sunriseText}</p>}
                 </div>
                 <div className="text-center p-4 bg-white/50 dark:bg-black/20 rounded-xl">
                   <Sunset className="w-8 h-8 text-orange-500 mx-auto mb-2" />
                   <p className="text-xs text-muted-foreground mb-1">Sunset</p>
-                  <p className="text-xl font-bold text-orange-600">
-                    {weatherData?.daily?.[0]?.sunset ? 
-                      new Date(weatherData.daily[0].sunset).toLocaleTimeString('en-US', {
-                        hour: 'numeric',
-                        minute: '2-digit',
-                        hour12: true
-                      }) : '6:45 PM'}
-                  </p>
+                  {showWeatherSkeleton ? <Skeleton className="h-6 w-20 mx-auto" /> : <p className="text-xl font-bold text-orange-600">{sunsetText}</p>}
                 </div>
               </div>
             </CardContent>
@@ -933,7 +1011,7 @@ const Weather = () => {
                   {/* Wind Arrow */}
                   <motion.div
                     className="absolute inset-0 flex items-center justify-center"
-                    animate={{ rotate: current.wind_direction || 180 }}
+                    animate={{ rotate: windDirection ?? 0 }}
                     transition={{ duration: 1, ease: "easeOut" }}
                   >
                     <div className="w-1 h-12 bg-gradient-to-t from-cyan-600 to-cyan-400 rounded-full relative">
@@ -946,19 +1024,9 @@ const Weather = () => {
                 </div>
                 <div className="ml-6">
                   <p className="text-sm text-muted-foreground mb-1">Direction</p>
-                  <p className="text-2xl font-bold text-cyan-600">{current.wind_direction || 180}°</p>
+                  {showWeatherSkeleton ? <Skeleton className="h-8 w-20 mb-1" /> : <p className="text-2xl font-bold text-cyan-600">{windDirection != null ? `${windDirection}°` : '--'}</p>}
                   <p className="text-xs text-muted-foreground mt-1">
-                    {(() => {
-                      const dir = current.wind_direction || 180;
-                      if (dir >= 337.5 || dir < 22.5) return 'North';
-                      if (dir >= 22.5 && dir < 67.5) return 'Northeast';
-                      if (dir >= 67.5 && dir < 112.5) return 'East';
-                      if (dir >= 112.5 && dir < 157.5) return 'Southeast';
-                      if (dir >= 157.5 && dir < 202.5) return 'South';
-                      if (dir >= 202.5 && dir < 247.5) return 'Southwest';
-                      if (dir >= 247.5 && dir < 292.5) return 'West';
-                      return 'Northwest';
-                    })()}
+                    {showWeatherSkeleton ? '' : windDirectionLabel}
                   </p>
                 </div>
               </div>
