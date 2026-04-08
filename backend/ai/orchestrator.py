@@ -6,11 +6,13 @@ Adds: confidence scoring, token cost tracking, chat history limiting.
 import logging
 import json
 import hashlib
+import os
 from typing import Dict, Any
 from datetime import datetime, timezone
 
 from ai.openai_client import ai_client
 from ai.sarvam_client import sarvam_client
+from ai.free_model_router import free_model_router
 from ai.agents import AGENTS, CitizenAgent
 from ai.function_executor import execute_tool_calls
 
@@ -20,6 +22,38 @@ logger = logging.getLogger(__name__)
 _query_cache: Dict[str, dict] = {}
 _CACHE_TTL_SECONDS = 300  
 _MAX_CHAT_HISTORY = 2
+_FREE_CHAT_MIN_CHARS = int(os.getenv("FREE_CHAT_MIN_CHARS", "40"))
+
+
+def _likely_needs_tools(message: str) -> bool:
+    """Heuristic guard: keep tool-reliant queries on primary orchestrated path."""
+    if not message:
+        return False
+    lower = message.lower()
+    hints = (
+        "playbook", "sop", "notify", "send alert", "publish", "broadcast", "mosdac",
+        "download", "dataset", "quiz", "db", "database", "analysis report", "admin",
+        "retract", "approve", "community report", "risk score",
+    )
+    return any(h in lower for h in hints)
+
+
+def _is_usable_free_answer(text: str) -> bool:
+    if not text:
+        return False
+    cleaned = text.strip()
+    if len(cleaned) < _FREE_CHAT_MIN_CHARS:
+        return False
+
+    low = cleaned.lower()
+    weak_patterns = (
+        "i am just a language model",
+        "cannot access real-time",
+        "i do not have access",
+        "sorry, i can't",
+        "i can't assist with that",
+    )
+    return not any(p in low for p in weak_patterns)
 
 
 def _sanitize_content(text: str) -> str:
@@ -229,6 +263,64 @@ class AIOrchestrator:
         lang_rule = _language_instruction(context.get("locale"), context.get("language"), message)
         if lang_rule:
             system_prompt = f"{system_prompt}\n\nLANGUAGE RULE:\n- {lang_rule}\n- Use the same language/script as the user message."
+
+        # 3.a Free-model fast path (Ollama) for simple conversational traffic.
+        free_chat_first = os.getenv("FREE_CHAT_FIRST", "false").strip().lower() in {"1", "true", "yes", "on"}
+        free_roles = {"citizen", "student"}
+        if (
+            free_chat_first
+            and free_model_router.enabled
+            and role in free_roles
+            and not context.get("force_primary_llm")
+            and not _likely_needs_tools(message)
+        ):
+            free_result = await free_model_router.chat(
+                system_prompt=system_prompt,
+                user_prompt=message,
+                max_tokens=min(agent.max_tokens, 500),
+                temperature=agent.temperature,
+            )
+            free_text = _sanitize_content(free_result.get("content") or "")
+
+            if not free_result.get("error") and _is_usable_free_answer(free_text):
+                confidence = _compute_confidence({"content": free_text}, [])
+                provider = free_result.get("provider") or "free"
+                model = free_result.get("model") or provider
+
+                response = {
+                    "success": True,
+                    "message": free_text,
+                    "role": role,
+                    "tool_calls_executed": [],
+                    "usage": {
+                        "model": model,
+                        "prompt": 0,
+                        "completion": 0,
+                        "total": 0,
+                        "total_tokens": 0,
+                    },
+                    "confidence": confidence,
+                    "token_cost": 0,
+                    "sources": [],
+                    "cached": False,
+                    "providers_used": [provider],
+                    "provider": provider,
+                }
+
+                if role == "student":
+                    _query_cache[_cache_key(role, message)] = {
+                        "response": response,
+                        "timestamp": datetime.now(timezone.utc),
+                    }
+
+                return response
+
+            logger.info(
+                "Free-model fast path skipped (provider_error=%s, usable=%s). Falling back to primary provider.",
+                free_result.get("error"),
+                _is_usable_free_answer(free_text),
+            )
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": message},
@@ -288,6 +380,7 @@ class AIOrchestrator:
                         "token_cost": 0,
                         "sources": [],
                         "cached": False,
+                        "providers_used": ["sarvam"],
                         "provider": "sarvam",
                     }
             except Exception as backup_exc:
@@ -305,6 +398,7 @@ class AIOrchestrator:
                 "token_cost": 0,
                 "sources": [],
                 "cached": False,
+                "providers_used": ["fallback"],
                 "provider": "fallback",
             }
 
@@ -421,11 +515,18 @@ class AIOrchestrator:
             "message": final_content or "Action completed.",
             "role": role,
             "tool_calls_executed": params["tool_calls_executed"],
-            "usage": {"total_tokens": total_tokens},
+            "usage": {
+                "model": agent.model,
+                "prompt": 0,
+                "completion": 0,
+                "total": total_tokens,
+                "total_tokens": total_tokens,
+            },
             "confidence": confidence,
             "token_cost": total_tokens,
             "sources": params["sources"][:5],
             "cached": cached,
+            "providers_used": ["openai"],
         }
         
         if params["quiz_data"]:

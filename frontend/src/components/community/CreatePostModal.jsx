@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   X, MapPin, Tag, AlertCircle, HelpCircle, 
   Megaphone, MessageSquare, Send, Camera, Trash2, Loader2
@@ -51,6 +51,18 @@ const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000');
 
 const SEVERITY_COLOR = { low: 'bg-yellow-500', medium: 'bg-orange-500', high: 'bg-red-500', critical: 'bg-red-700' };
 const DISASTER_EMOJI = { fire: '🔥', flood: '🌊', earthquake: '🌍', cyclone: '🌀', landslide: '🏔️', none: '📷' };
+const AUTHENTICITY_COLOR = { likely_real: 'bg-emerald-600', uncertain: 'bg-amber-600', suspected_fake: 'bg-rose-700' };
+const AUTHENTICITY_LABEL = { likely_real: 'Likely Real', uncertain: 'Unverified', suspected_fake: 'Possible Fake' };
+
+const getGeneratedDescription = (analysis) => (
+  analysis?.self_generated_description || analysis?.description || ''
+);
+
+const isLikelyFake = (analysis) => {
+  const authenticity = analysis?.authenticity;
+  const syntheticProbability = Number(analysis?.synthetic_probability || 0);
+  return authenticity === 'suspected_fake' && syntheticProbability >= 0.65;
+};
 
 // Determine if all uploaded images are irrelevant for non-general posts
 const allImagesIrrelevant = (files, type) => {
@@ -58,6 +70,21 @@ const allImagesIrrelevant = (files, type) => {
   const analyzed = files.filter((f) => f.analysis?.analysis);
   if (analyzed.length === 0) return false; // no analysis yet
   return analyzed.every((f) => f.analysis.analysis.disaster_type === 'none');
+};
+
+const getImageBlockReason = (files, type) => {
+  const analyses = files.map((f) => f.analysis?.analysis).filter(Boolean);
+  if (analyses.length === 0) return null;
+
+  const highTrustTypes = new Set(['help', 'alert', 'emergency']);
+  if (highTrustTypes.has(type) && analyses.some((a) => isLikelyFake(a))) {
+    return 'AI authenticity check flagged this image as possibly edited/fake. Please upload an original photo.';
+  }
+
+  if (allImagesIrrelevant(files, type)) {
+    return 'The image does not appear to show any disaster or emergency situation. Please capture a relevant photo or switch to General Post.';
+  }
+  return null;
 };
 
 // Auto-suggest disaster post type from AI analysis
@@ -98,6 +125,10 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
   const [isGettingLocation, setIsGettingLocation] = useState(false);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [imageBlockReason, setImageBlockReason] = useState(null);
+
+  useEffect(() => {
+    setImageBlockReason(getImageBlockReason(uploadedFiles, postType));
+  }, [uploadedFiles, postType]);
 
   const postTypes = [
     { value: 'general', label: 'General Post', icon: MessageSquare, color: 'bg-blue-500' },
@@ -180,10 +211,10 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
         // After upload: if AI detected a disaster, auto-fill content & tags (if blank)
         const imageAnalysis = analysis?.analysis;
         if (imageAnalysis && imageAnalysis.disaster_type !== 'none') {
-          setImageBlockReason(null);
+          const generatedDescription = getGeneratedDescription(imageAnalysis);
           // Auto-fill content if user hasn't typed yet
-          if (!content.trim() && imageAnalysis.description) {
-            setContent(imageAnalysis.description);
+          if (!content.trim() && generatedDescription) {
+            setContent(generatedDescription);
           }
           // Auto-add tags (avoid duplicates)
           const suggested = buildTagsFromAnalysis(imageAnalysis);
@@ -195,14 +226,6 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
           // Suggest post type
           const sugType = suggestPostType(imageAnalysis);
           if (sugType) setPostType(sugType);
-        } else if (imageAnalysis && imageAnalysis.disaster_type === 'none') {
-          // Check if block needed after this update
-          const allIrrelevant = updated
-            .filter((f) => f.analysis?.analysis)
-            .every((f) => f.analysis.analysis.disaster_type === 'none');
-          if (allIrrelevant) {
-            setImageBlockReason('The image does not appear to show any disaster or emergency situation. Please capture a relevant photo or remove the image.');
-          }
         }
 
         return updated;
@@ -223,18 +246,23 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
   };
 
   const handleSubmit = () => {
-    if (!content.trim()) {
-      alert('Please enter post content');
-      return;
-    }
     if (pendingUploads > 0) {
       alert('Please wait for images to finish uploading');
       return;
     }
-    // Block if images are present but completely irrelevant (for non-general posts)
-    const hasImages = uploadedFiles.filter((f) => f.backendUrl).length > 0;
-    if (hasImages && postType !== 'general' && allImagesIrrelevant(uploadedFiles, postType)) {
-      alert('⚠️ Your image does not appear to show a disaster or emergency situation.\n\nPlease capture a relevant photo showing the actual situation, or change the post type to "General Post".');
+
+    const blockReason = getImageBlockReason(uploadedFiles, postType);
+    if (blockReason) {
+      alert(`⚠️ ${blockReason}`);
+      return;
+    }
+
+    const generatedDescription = uploadedFiles
+      .map((f) => getGeneratedDescription(f.analysis?.analysis))
+      .find((d) => d && d.trim()) || '';
+    const finalContent = (content || '').trim() || generatedDescription.trim();
+    if (!finalContent) {
+      alert('Please enter post content or upload an image for AI-generated description.');
       return;
     }
 
@@ -258,7 +286,7 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
     const post = {
       type: postType,
       title: title.trim(),
-      content: content.trim(),
+      content: finalContent,
       location: location.trim() || 'Unknown',
       lat: autoLocation?.latitude || null,
       lon: autoLocation?.longitude || null,
@@ -477,6 +505,13 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
                             className={`absolute top-2 left-2 text-[10px] px-1.5 py-0.5 text-white border-0 ${SEVERITY_COLOR[file.analysis.analysis.severity] || 'bg-gray-600'}`}
                           >
                             {DISASTER_EMOJI[file.analysis.analysis.disaster_type] || '⚠️'} {file.analysis.analysis.disaster_type} · {file.analysis.analysis.severity}
+                          </Badge>
+                        )}
+                        {file.analysis?.analysis?.authenticity && (
+                          <Badge
+                            className={`absolute bottom-2 right-2 text-[10px] px-1.5 py-0.5 text-white border-0 ${AUTHENTICITY_COLOR[file.analysis.analysis.authenticity] || 'bg-gray-700'}`}
+                          >
+                            {AUTHENTICITY_LABEL[file.analysis.analysis.authenticity] || 'Unverified'}
                           </Badge>
                         )}
                       </div>

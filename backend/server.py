@@ -494,7 +494,7 @@ async def ai_vision(request: Request):
 
     result = await analyze_community_image(image_source, description)
 
-    if result.get("error"):
+    if result.get("error") and not result.get("analysis"):
         raise HTTPException(status_code=500, detail=result["error"])
 
     return result

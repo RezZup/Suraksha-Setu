@@ -47,9 +47,6 @@ backend/temp_audio/
 uploads/
 temp_audio/
 
-# --- Notebooks with embedded tokens ---
-colab.ipynb
-
 # --- Build outputs ---
 frontend/build/
 frontend/dist/

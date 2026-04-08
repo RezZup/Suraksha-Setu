@@ -56,6 +56,7 @@ class CreatePostRequest(BaseModel):
     lat: Optional[float] = None
     lon: Optional[float] = None
     pincode: Optional[str] = None
+    image_analysis: Optional[dict] = None
 
 
 class CreateCommentRequest(BaseModel):
@@ -280,6 +281,36 @@ async def create_post(
         ))
         await db.flush()
 
+    post_content = (request.content or "").strip()
+    if not post_content and isinstance(request.image_analysis, dict):
+        post_content = (
+            request.image_analysis.get("self_generated_description")
+            or request.image_analysis.get("description")
+            or ""
+        ).strip()
+
+    if not post_content and request.media:
+        for media_item in request.media:
+            if not isinstance(media_item, dict):
+                continue
+            media_analysis = media_item.get("analysis")
+            if isinstance(media_analysis, dict):
+                media_analysis = media_analysis.get("analysis") if isinstance(media_analysis.get("analysis"), dict) else media_analysis
+                if isinstance(media_analysis, dict):
+                    post_content = (
+                        media_analysis.get("self_generated_description")
+                        or media_analysis.get("description")
+                        or ""
+                    ).strip()
+            if post_content:
+                break
+
+    if not post_content and request.media:
+        post_content = (request.title or "").strip() or "Community media update"
+
+    if not post_content:
+        raise HTTPException(status_code=400, detail="Post content, media, or valid image description is required")
+
     location_meta = {
         "name": request.location or "",
         "author": request.author or "Anonymous",
@@ -291,11 +322,13 @@ async def create_post(
         location_meta["lon"] = request.lon
     if request.pincode:
         location_meta["pincode"] = request.pincode
+    if isinstance(request.image_analysis, dict) and request.image_analysis:
+        location_meta["image_analysis"] = request.image_analysis
 
     db_post = CommunityPost(
         id=post_id,
         user_id=effective_user_id,
-        content=request.content,
+        content=post_content,
         post_type=request.type,
         media=request.media or [],
         location=location_meta,
@@ -318,11 +351,11 @@ async def create_post(
             alert_payload = {
                 "type": "community_post",
                 "title": f"🚨 {request.type.capitalize()} nearby — {request.author}",
-                "body": request.content[:150],
+                "body": post_content[:150],
                 "post_type": request.type,
                 "id": post_id,
                 "author": request.author,
-                "content": request.content[:200],
+                "content": post_content[:200],
                 "location": request.location,
                 "coordinates": {"lat": request.lat, "lon": request.lon},
                 "lat": request.lat,
@@ -351,7 +384,7 @@ async def create_post(
                     post_type=request.type,
                     author=request.author or "Community Member",
                     location=request.location or "your area",
-                    content=request.content,
+                    content=post_content,
                     app_url="http://localhost:3000/app/community",
                 )
                 logger.info(

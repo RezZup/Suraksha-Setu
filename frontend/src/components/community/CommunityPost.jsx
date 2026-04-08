@@ -43,6 +43,18 @@ const BADGE_STYLE = {
   Helper:    'bg-teal-100 text-teal-700 border-teal-200',
 };
 
+const AUTHENTICITY_STYLE = {
+  likely_real: 'bg-emerald-600',
+  uncertain: 'bg-amber-600',
+  suspected_fake: 'bg-rose-700',
+};
+
+const AUTHENTICITY_LABEL = {
+  likely_real: 'Likely real',
+  uncertain: 'Unverified',
+  suspected_fake: 'Possible fake',
+};
+
 const CommunityPost = ({ 
   post, 
   onLike, 
@@ -191,6 +203,18 @@ const CommunityPost = ({
   const timeAgo = getTimeAgo(post.timestamp);
   const mediaFiles = post.media || [];
   const hasMedia = mediaFiles.length > 0;
+  const fallbackImageAnalysis = mediaFiles
+    .map((m) => m?.analysis?.analysis)
+    .filter(Boolean)
+    .sort((a, b) => (b?.confidence || 0) - (a?.confidence || 0))[0] || null;
+  const postImageAnalysis = post.image_analysis || fallbackImageAnalysis;
+  const postGeneratedDescription = postImageAnalysis
+    ? (postImageAnalysis.self_generated_description || postImageAnalysis.description || '')
+    : '';
+  const showGeneratedDescription = (
+    postGeneratedDescription
+    && postGeneratedDescription.trim().toLowerCase() !== (post.content || '').trim().toLowerCase()
+  );
 
   const typeBorderColor = {
     emergency: 'border-l-4 border-l-red-600',
@@ -325,18 +349,25 @@ const CommunityPost = ({
             <p className="text-sm whitespace-pre-wrap">{post.content}</p>
 
             {/* AI Image Analysis Badge */}
-            {post.image_analysis && post.image_analysis.disaster_type !== 'none' && (
+            {postImageAnalysis && (
               <div className="mt-2 flex items-center gap-2 p-2 rounded bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800">
                 <span className="text-base">
-                  {{'fire':'🔥','flood':'🌊','earthquake':'🌍','cyclone':'🌀','landslide':'🏔️'}[post.image_analysis.disaster_type] || '⚠️'}
+                  {{'fire':'🔥','flood':'🌊','earthquake':'🌍','cyclone':'🌀','landslide':'🏔️','none':'📷'}[postImageAnalysis.disaster_type] || '⚠️'}
                 </span>
                 <div>
                   <p className="text-xs font-semibold text-red-700 dark:text-red-400 capitalize">
-                    {post.image_analysis.disaster_type} detected in image · {post.image_analysis.severity} severity
+                    {postImageAnalysis.disaster_type !== 'none'
+                      ? `${postImageAnalysis.disaster_type} detected in image · ${postImageAnalysis.severity} severity`
+                      : 'Image analyzed by AI'}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    {Math.round((post.image_analysis.confidence || 0) * 100)}% confidence · AI-analyzed
+                    {Math.round((postImageAnalysis.confidence || 0) * 100)}% confidence · {AUTHENTICITY_LABEL[postImageAnalysis.authenticity] || 'Unverified'}
                   </p>
+                  {showGeneratedDescription && (
+                    <p className="text-xs text-muted-foreground line-clamp-2 mt-1">
+                      AI summary: {postGeneratedDescription}
+                    </p>
+                  )}
                 </div>
               </div>
             )}
@@ -405,6 +436,16 @@ const CommunityPost = ({
                           style={{ backgroundColor: { low: '#eab308', medium: '#f97316', high: '#ef4444', critical: '#991b1b' }[mediaAnalysis.severity] || '#6b7280' }}
                         >
                           {mediaAnalysis.disaster_type} · {mediaAnalysis.severity}
+                        </Badge>
+                      )}
+                      {mediaAnalysis?.authenticity && (
+                        <Badge
+                          className={cn(
+                            'absolute top-2 right-2 text-xs text-white border-0',
+                            AUTHENTICITY_STYLE[mediaAnalysis.authenticity] || 'bg-gray-600'
+                          )}
+                        >
+                          {AUTHENTICITY_LABEL[mediaAnalysis.authenticity] || 'Unverified'}
                         </Badge>
                       )}
                     </>
@@ -722,11 +763,23 @@ const CommunityPost = ({
                   )}
 
                   {/* AI Analysis overlay */}
-                  {sel.analysis?.analysis && sel.analysis.analysis.disaster_type !== 'none' && (
+                  {sel.analysis?.analysis && (
                     <div className="absolute top-4 right-4 bg-black/70 text-white p-3 rounded-lg text-sm">
-                      <p className="font-semibold capitalize">{sel.analysis.analysis.disaster_type} detected</p>
-                      <p className="text-xs">Severity: {sel.analysis.analysis.severity}</p>
+                      <p className="font-semibold capitalize">
+                        {sel.analysis.analysis.disaster_type !== 'none'
+                          ? `${sel.analysis.analysis.disaster_type} detected`
+                          : 'Image analyzed'}
+                      </p>
+                      {sel.analysis.analysis.disaster_type !== 'none' && (
+                        <p className="text-xs">Severity: {sel.analysis.analysis.severity}</p>
+                      )}
                       <p className="text-xs">Confidence: {Math.round(sel.analysis.analysis.confidence * 100)}%</p>
+                      <p className="text-xs">Authenticity: {AUTHENTICITY_LABEL[sel.analysis.analysis.authenticity] || 'Unverified'}</p>
+                      {(sel.analysis.analysis.self_generated_description || sel.analysis.analysis.description) && (
+                        <p className="text-xs mt-1 max-w-[240px]">
+                          {(sel.analysis.analysis.self_generated_description || sel.analysis.analysis.description).slice(0, 160)}
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>

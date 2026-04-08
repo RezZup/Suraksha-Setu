@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ai.openai_client import ai_client
 from ai.sarvam_client import sarvam_client
+from ai.free_model_router import free_model_router
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,26 @@ async def process_voice_query(
         transcript_result = None
         detected_language = language or "unknown"
 
-        if sarvam_client.enabled:
+        free_stt_first = os.getenv("FREE_STT_FIRST", "false").strip().lower() in {"1", "true", "yes", "on"}
+        if free_stt_first and free_model_router.enabled:
+            try:
+                free_stt = await asyncio.wait_for(
+                    free_model_router.transcribe_audio(normalised, language=language),
+                    timeout=12.0,
+                )
+            except asyncio.TimeoutError:
+                free_stt = {"error": "Free STT timeout", "text": None}
+
+            if not free_stt.get("error") and free_stt.get("text"):
+                transcript_result = {
+                    "text": free_stt["text"],
+                    "language": free_stt.get("language") or language or "unknown",
+                    "provider": free_stt.get("provider") or "free",
+                    "error": None,
+                }
+                logger.info("STT via free provider (%s)", transcript_result["provider"])
+
+        if not transcript_result and sarvam_client.enabled:
             try:
                 sarvam_result = await asyncio.wait_for(
                     sarvam_client.speech_to_text(normalised, language=language),
@@ -84,6 +104,7 @@ async def process_voice_query(
                 transcript_result = {
                     "text": sarvam_result["text"],
                     "language": sarvam_result.get("language") or language or "hi-IN",
+                    "provider": "sarvam",
                     "error": None,
                 }
                 logger.info("STT via Sarvam Saarika")
@@ -103,6 +124,7 @@ async def process_voice_query(
                     "transcript": None,
                     "response": None,
                 }
+            transcript_result["provider"] = "openai_whisper"
 
         transcript = transcript_result["text"]
         detected_language = transcript_result.get("language") or language or "unknown"
@@ -132,6 +154,7 @@ async def process_voice_query(
             "detected_language": detected_language,
             "response": ai_response.get("message", ""),
             "usage": ai_response.get("usage"),
+            "stt_provider": transcript_result.get("provider"),
             "error": None,
         }
     finally:
