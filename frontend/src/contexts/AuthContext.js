@@ -3,6 +3,7 @@ import { auth, loginWithEmail, loginWithGoogle, registerWithEmail, logout as fir
 import { onAuthStateChanged } from 'firebase/auth';
 
 const AuthContext = createContext(null);
+const BACKEND = process.env.REACT_APP_BACKEND_URL || process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
@@ -128,6 +129,29 @@ export const AuthProvider = ({ children }) => {
   const [firebaseReady, setFirebaseReady] = useState(false);
   const [userLocation, setUserLocation] = useState(() => readLocationCache());
 
+  const syncBackendUserProfile = async (firebaseUser, idToken, role) => {
+    if (!firebaseUser?.uid || !idToken) return;
+
+    try {
+      await fetch(`${BACKEND}/api/profile/${firebaseUser.uid}`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          firebase_display_name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
+          firebase_email: firebaseUser.email || '',
+          firebase_photo_url: firebaseUser.photoURL || undefined,
+          firebase_role: role || 'citizen',
+        }),
+      });
+    } catch (err) {
+      // Best-effort sync only; auth should continue even if backend is temporarily unreachable.
+      console.warn('Backend user sync skipped:', err?.message || err);
+    }
+  };
+
   // Check Firebase configuration on mount
   useEffect(() => {
     if (!isFirebaseConfigured) {
@@ -206,6 +230,9 @@ export const AuthProvider = ({ children }) => {
         localStorage.setItem('auth_user', JSON.stringify(userData));
         localStorage.setItem('auth_token_expiry', expiryTime.toString());
 
+        // Ensure Firebase-authenticated users always exist in backend DB.
+        await syncBackendUserProfile(firebaseUser, idToken, userRole);
+
         // Detect location in background (uses cache if fresh)
         detectUserLocation().then((loc) => { if (loc) setUserLocation(loc); });
       } else {
@@ -255,6 +282,8 @@ export const AuthProvider = ({ children }) => {
 
       setUser(userData);
       setToken(idToken);
+
+      await syncBackendUserProfile(firebaseUser, idToken, userRole);
       return userData;
     } catch (err) {
       setError(err.message);
@@ -321,6 +350,8 @@ export const AuthProvider = ({ children }) => {
 
       setUser(userData);
       setToken(idToken);
+
+      await syncBackendUserProfile(firebaseUser, idToken, userRole);
       return userData;
     } catch (err) {
       setError(err.message);
@@ -360,6 +391,8 @@ export const AuthProvider = ({ children }) => {
 
       setUser(userData);
       setToken(idToken);
+
+      await syncBackendUserProfile(firebaseUser, idToken, userRole);
       return userData;
     } catch (err) {
       setError(err.message);

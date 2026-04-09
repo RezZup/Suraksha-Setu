@@ -76,6 +76,9 @@ class SMSService:
     def __init__(self):
         self.account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
         self.auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+        self.default_country_code = os.getenv("TWILIO_DEFAULT_COUNTRY_CODE", "+91").strip() or "+91"
+        if not self.default_country_code.startswith("+"):
+            self.default_country_code = f"+{''.join(ch for ch in self.default_country_code if ch.isdigit())}"
         self.from_number = self._normalize_e164(os.getenv("TWILIO_FROM_NUMBER", ""))
         self.whatsapp_from = os.getenv("TWILIO_WHATSAPP_FROM", "")
         if not self.whatsapp_from and self.from_number:
@@ -115,8 +118,31 @@ class SMSService:
             cleaned = f"+{cleaned}"
         return cleaned
 
+    def _normalize_recipient_e164(self, phone: str) -> str:
+        raw = (phone or "").strip()
+        if not raw:
+            return ""
+
+        digits_only = "".join(ch for ch in raw if ch.isdigit())
+        if not digits_only:
+            return ""
+
+        if raw.startswith("+"):
+            return f"+{digits_only}"
+
+        if digits_only.startswith("00") and len(digits_only) > 2:
+            return f"+{digits_only[2:]}"
+
+        # Common India/local format fallback: 10-digit mobile number.
+        if len(digits_only) == 10:
+            country_digits = "".join(ch for ch in self.default_country_code if ch.isdigit())
+            if country_digits:
+                return f"+{country_digits}{digits_only}"
+
+        return f"+{digits_only}"
+
     def _to_whatsapp_address(self, phone: str) -> Optional[str]:
-        e164 = self._normalize_e164(phone)
+        e164 = self._normalize_recipient_e164(phone)
         if not e164:
             return None
         return f"whatsapp:{e164}"
@@ -125,21 +151,26 @@ class SMSService:
         """
         Send a single SMS. Returns result dict.
         """
+        normalized_to = self._normalize_recipient_e164(to_number)
+        if not normalized_to:
+            logger.error("❌ SMS failed due to invalid recipient number: %s", to_number)
+            return {"success": False, "error": "invalid_recipient_number", "to": to_number}
+
         if not self._available:
-            logger.info(f"[SMS-MOCK] To: {to_number} | Msg: {message[:80]}...")
-            return {"success": True, "mock": True, "to": to_number, "sid": "mock"}
+            logger.info(f"[SMS-MOCK] To: {normalized_to} | Msg: {message[:80]}...")
+            return {"success": True, "mock": True, "to": normalized_to, "sid": "mock"}
 
         try:
             msg = self._client.messages.create(
                 body=message[:1600],  # Twilio limit
                 from_=self.from_number,
-                to=to_number,
+                to=normalized_to,
             )
-            logger.info(f"✅ SMS sent to {to_number}: SID={msg.sid}")
-            return {"success": True, "mock": False, "to": to_number, "sid": msg.sid}
+            logger.info(f"✅ SMS sent to {normalized_to}: SID={msg.sid}")
+            return {"success": True, "mock": False, "to": normalized_to, "sid": msg.sid}
         except Exception as e:
-            logger.error(f"❌ SMS failed to {to_number}: {e}")
-            return {"success": False, "error": str(e), "to": to_number}
+            logger.error(f"❌ SMS failed to {normalized_to}: {e}")
+            return {"success": False, "error": str(e), "to": normalized_to}
 
     async def send_whatsapp(self, to_number: str, message: str) -> Dict[str, Any]:
         """Send one WhatsApp message via Twilio WhatsApp channel."""

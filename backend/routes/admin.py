@@ -7,11 +7,13 @@ from typing import Optional, List, Dict, Any
 from database import get_db, Alert, IncidentLog, User, CommunityReport, CommunityPost, AILog, UserReport, Notification
 from notifications import ws_manager
 from sqlalchemy import select, func
+from sqlalchemy.orm.attributes import flag_modified
 import logging
 import uuid
 import json
 import asyncio
 import os
+import copy
 from datetime import datetime, timezone, timedelta
 from firebase_auth import verify_firebase_token
 from ai.openai_client import ai_client, GOOGLE_MODEL_CHAT, OPENROUTER_CHAT_MODEL
@@ -54,6 +56,7 @@ router = APIRouter(prefix="/admin", tags=["Admin"], dependencies=[Depends(requir
 
 REVIEW_REQUIRED_POST_TYPES = {"alert", "warning", "emergency"}
 COMMUNITY_APPROVAL_NOTIFY_CHANNELS = {"sms", "telegram"}
+DEFAULT_COMMUNITY_APPROVAL_CHANNELS = ["sms", "telegram"]
 DEFAULT_COMMUNITY_APPROVAL_RADIUS_KM = 10.0
 MAX_COMMUNITY_APPROVAL_RADIUS_KM = 50.0
 COMMUNITY_VERIFICATION_STATUS_META = {
@@ -92,6 +95,114 @@ def _extract_lat_lon(location_meta: Dict[str, Any]) -> tuple[Optional[float], Op
     return lat, lon
 
 
+def _normalize_pincode(value: Any) -> Optional[str]:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if len(digits) < 6:
+        return None
+    return digits[:6]
+
+
+def _extract_pincode(location_meta: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(location_meta, dict):
+        return None
+
+    pincode_candidates = (
+        location_meta.get("pincode"),
+        location_meta.get("pin_code"),
+        location_meta.get("gps_pincode"),
+        location_meta.get("home_pincode"),
+    )
+    for candidate in pincode_candidates:
+        normalized = _normalize_pincode(candidate)
+        if normalized:
+            return normalized
+    return None
+
+
+def _user_channel_enabled(user: User, *channel_keys: str) -> bool:
+    channels = user.notification_channels if isinstance(user.notification_channels, dict) else {}
+    for key in channel_keys:
+        if key in channels:
+            return channels.get(key) is not False
+    return True
+
+
+async def _collect_nearby_users_for_dispatch(
+    db,
+    lat: Optional[float],
+    lon: Optional[float],
+    radius_km: float,
+    pincode: Optional[str],
+) -> List[Dict[str, Any]]:
+    from utils.spatial_query import haversine_distance
+
+    normalized_pincode = _normalize_pincode(pincode)
+    has_coordinates = lat is not None and lon is not None
+    if not has_coordinates and not normalized_pincode:
+        return []
+
+    query = (
+        select(User)
+        .where(User.is_active == True, User.location.isnot(None))
+        .limit(10000)
+    )
+    result = await db.execute(query)
+    users = result.scalars().all()
+
+    nearby: List[Dict[str, Any]] = []
+    for user in users:
+        user_loc = user.location if isinstance(user.location, dict) else {}
+        user_lat, user_lon = _extract_lat_lon(user_loc)
+        user_pin = _extract_pincode(user_loc)
+
+        distance_km: Optional[float] = None
+        matched_by: Optional[str] = None
+
+        if has_coordinates and user_lat is not None and user_lon is not None:
+            try:
+                distance_val = haversine_distance(float(lat), float(lon), float(user_lat), float(user_lon))
+                try:
+                    user_pref_radius = float(user.notification_radius_km) if user.notification_radius_km is not None else radius_km
+                except (TypeError, ValueError):
+                    user_pref_radius = radius_km
+                effective_radius = max(1.0, min(radius_km, max(1.0, user_pref_radius)))
+                if distance_val <= effective_radius:
+                    distance_km = round(distance_val, 2)
+                    matched_by = "radius"
+            except Exception:
+                matched_by = None
+
+        if matched_by is None and normalized_pincode and user_pin == normalized_pincode:
+            matched_by = "pincode"
+
+        if matched_by:
+            nearby.append(
+                {
+                    "user": user,
+                    "distance_km": distance_km,
+                    "matched_by": matched_by,
+                }
+            )
+
+    # Deduplicate by user id, prefer distance-based match over pincode fallback.
+    dedup: Dict[str, Dict[str, Any]] = {}
+    for row in nearby:
+        user_id = str(row["user"].id)
+        existing = dedup.get(user_id)
+        if existing is None:
+            dedup[user_id] = row
+            continue
+
+        existing_distance = existing.get("distance_km")
+        current_distance = row.get("distance_km")
+        if existing_distance is None and current_distance is not None:
+            dedup[user_id] = row
+        elif existing_distance is not None and current_distance is not None and current_distance < existing_distance:
+            dedup[user_id] = row
+
+    return list(dedup.values())
+
+
 def _community_dispatch_text(post: CommunityPost, location_label: str) -> str:
     post_type = str(post.post_type or "alert").strip().upper()
     short_content = (post.content or "")[:180]
@@ -111,6 +222,7 @@ async def _dispatch_approved_community_post(
 ) -> Dict[str, Any]:
     """Send nearby community approval notifications and return channel delivery stats."""
     lat, lon = _extract_lat_lon(location_meta)
+    pincode = _extract_pincode(location_meta)
     location_label = (
         location_meta.get("name")
         or location_meta.get("city")
@@ -121,122 +233,285 @@ async def _dispatch_approved_community_post(
         "radius_km": radius_km,
         "channels_requested": channels,
         "has_coordinates": lat is not None and lon is not None,
+        "pincode": pincode,
+        "recipient_candidates": 0,
         "sms": {"requested": "sms" in channels, "total": 0, "sent": 0, "failed": 0},
         "telegram": {"requested": "telegram" in channels, "total": 0, "sent": 0, "failed": 0},
+        "in_app": {"requested": True, "total": 0, "queued": 0, "ws_delivered": 0},
+        "alert_center": {"created": False, "alert_id": None},
         "ws_broadcast": False,
         "push_sent": 0,
         "errors": [],
     }
 
-    if lat is None or lon is None:
-        summary["errors"].append("Post has no valid latitude/longitude for nearby notifications")
+    if (lat is None or lon is None) and not pincode:
+        summary["errors"].append("Post has neither coordinates nor pincode for nearby notifications")
         return summary
 
+    nearby_rows = await _collect_nearby_users_for_dispatch(
+        db=db,
+        lat=lat,
+        lon=lon,
+        radius_km=radius_km,
+        pincode=pincode,
+    )
+    summary["recipient_candidates"] = len(nearby_rows)
+
     message_text = _community_dispatch_text(post, location_label)
+    notify_channels = _normalize_channel_list(channels)
 
-    if "sms" in channels:
+    if "sms" in notify_channels:
         try:
-            from sms_service import sms_service, phone_registry
+            from sms_service import sms_service
 
-            recipients = await phone_registry.get_user_phones_near_from_db(
-                db_session=db,
-                lat=lat,
-                lon=lon,
-                radius_km=radius_km,
-            )
-            summary["sms"]["total"] = len(recipients)
-            if recipients:
-                sms_jobs = [sms_service.send_sms(row["phone"], message_text) for row in recipients]
+            sms_recipients: List[Dict[str, Any]] = []
+            seen_phones = set()
+            for row in nearby_rows:
+                user = row["user"]
+                if not user.phone or not _user_channel_enabled(user, "sms"):
+                    continue
+                phone_value = str(user.phone).strip()
+                if not phone_value or phone_value in seen_phones:
+                    continue
+                seen_phones.add(phone_value)
+                sms_recipients.append({"phone": phone_value, "user_id": user.id})
+
+            summary["sms"]["total"] = len(sms_recipients)
+            if sms_recipients:
+                sms_jobs = [sms_service.send_sms(row["phone"], message_text) for row in sms_recipients]
                 sms_results = await asyncio.gather(*sms_jobs, return_exceptions=True)
                 sent_count = 0
                 for idx, sms_res in enumerate(sms_results):
                     if isinstance(sms_res, Exception):
-                        summary["errors"].append(f"SMS error for {recipients[idx].get('phone')}: {sms_res}")
+                        summary["errors"].append(f"SMS error for {sms_recipients[idx].get('phone')}: {sms_res}")
                         continue
                     if sms_res.get("success"):
                         sent_count += 1
                 summary["sms"]["sent"] = sent_count
-                summary["sms"]["failed"] = len(recipients) - sent_count
+                summary["sms"]["failed"] = len(sms_recipients) - sent_count
         except Exception as exc:
             logger.warning("Community approval SMS dispatch failed for post=%s: %s", post.id, exc)
             summary["errors"].append(f"SMS dispatch failed: {exc}")
 
-    if "telegram" in channels:
+    if "telegram" in notify_channels:
         try:
             from telegram_service import telegram_service
-            from utils.spatial_query import haversine_distance
 
             if telegram_service.enabled:
-                tg_query = await db.execute(
-                    select(User).where(
-                        User.is_active == True,
-                        User.telegram_chat_id.isnot(None),
-                    )
-                )
-                tg_users = tg_query.scalars().all()
-                recipients: List[str] = []
-                for user in tg_users:
-                    user_loc = user.location if isinstance(user.location, dict) else {}
-                    u_lat, u_lon = _extract_lat_lon(user_loc)
-                    if u_lat is None or u_lon is None:
+                tg_recipients: List[str] = []
+                for row in nearby_rows:
+                    user = row["user"]
+                    if not user.telegram_chat_id:
                         continue
-
-                    user_channels = user.notification_channels if isinstance(user.notification_channels, dict) else {}
-                    if user_channels.get("telegram") is False:
+                    if not _user_channel_enabled(user, "telegram"):
                         continue
+                    tg_recipients.append(str(user.telegram_chat_id))
 
-                    if haversine_distance(lat, lon, u_lat, u_lon) <= radius_km:
-                        recipients.append(user.telegram_chat_id)
-
-                summary["telegram"]["total"] = len(recipients)
-                if recipients:
-                    tg_jobs = [telegram_service.send_message(chat_id, message_text) for chat_id in recipients]
+                summary["telegram"]["total"] = len(tg_recipients)
+                if tg_recipients:
+                    tg_jobs = [telegram_service.send_message(chat_id, message_text) for chat_id in tg_recipients]
                     tg_results = await asyncio.gather(*tg_jobs, return_exceptions=True)
                     sent_count = 0
                     for idx, tg_res in enumerate(tg_results):
                         if isinstance(tg_res, Exception):
-                            summary["errors"].append(f"Telegram error for chat {recipients[idx]}: {tg_res}")
+                            summary["errors"].append(f"Telegram error for chat {tg_recipients[idx]}: {tg_res}")
                             continue
                         if tg_res is True:
                             sent_count += 1
                     summary["telegram"]["sent"] = sent_count
-                    summary["telegram"]["failed"] = len(recipients) - sent_count
+                    summary["telegram"]["failed"] = len(tg_recipients) - sent_count
             else:
                 summary["errors"].append("Telegram service is not configured")
         except Exception as exc:
             logger.warning("Community approval Telegram dispatch failed for post=%s: %s", post.id, exc)
             summary["errors"].append(f"Telegram dispatch failed: {exc}")
 
+    now_iso = datetime.now(timezone.utc).isoformat()
+    community_type = str(post.post_type or "alert").strip().lower() or "alert"
+    alert_severity = {
+        "emergency": "critical",
+        "warning": "high",
+        "alert": "moderate",
+    }.get(community_type, "moderate")
+    alert_location = copy.deepcopy(location_meta) if isinstance(location_meta, dict) else {}
+    if lat is not None:
+        alert_location["lat"] = lat
+    if lon is not None:
+        alert_location["lon"] = lon
+    if pincode and not alert_location.get("pincode"):
+        alert_location["pincode"] = pincode
+
+    try:
+        existing_alert = None
+        existing_alerts_result = await db.execute(
+            select(Alert)
+            .where(Alert.source == "community_verified", Alert.retracted == False)
+            .order_by(Alert.created_at.desc())
+            .limit(300)
+        )
+        for candidate in existing_alerts_result.scalars().all():
+            metadata = candidate.alert_metadata if isinstance(candidate.alert_metadata, dict) else {}
+            if metadata.get("community_post_id") == post.id:
+                existing_alert = candidate
+                break
+
+        alert_title = f"Verified community {community_type.capitalize()} near {location_label}"
+        alert_description = (post.content or "").strip()[:500] or "Verified community report published by admin."
+        alert_metadata = {
+            "community_post_id": post.id,
+            "verification_status": "approved",
+            "notify_radius_km": radius_km,
+            "updated_at": now_iso,
+        }
+
+        if existing_alert:
+            existing_alert.alert_type = community_type
+            existing_alert.severity = alert_severity
+            existing_alert.title = alert_title
+            existing_alert.description = alert_description
+            existing_alert.location = alert_location
+            existing_alert.alert_metadata = alert_metadata
+            existing_alert.is_active = True
+            existing_alert.retracted = False
+            existing_alert.source = "community_verified"
+            flag_modified(existing_alert, "location")
+            flag_modified(existing_alert, "alert_metadata")
+            alert_row = existing_alert
+        else:
+            alert_row = Alert(
+                id=str(uuid.uuid4()),
+                alert_type=community_type,
+                severity=alert_severity,
+                title=alert_title,
+                description=alert_description,
+                location=alert_location,
+                alert_metadata=alert_metadata,
+                source="community_verified",
+                is_active=True,
+                retracted=False,
+            )
+            db.add(alert_row)
+
+        summary["alert_center"] = {
+            "created": existing_alert is None,
+            "alert_id": alert_row.id,
+        }
+    except Exception as exc:
+        logger.warning("Community approval alert-center publish failed for post=%s: %s", post.id, exc)
+        summary["errors"].append(f"Alert-center publish failed: {exc}")
+        alert_row = None
+
     try:
         from notifications import push_manager
 
         ws_payload = {
-            "type": "community_post_verified",
-            "id": post.id,
-            "post_type": post.post_type,
-            "title": f"Verified community {str(post.post_type or 'alert').capitalize()} nearby",
-            "body": (post.content or "")[:200],
+            "type": "new_alert",
+            "id": alert_row.id if alert_row else post.id,
+            "alert_type": community_type,
+            "title": f"Verified community {community_type.capitalize()} nearby",
+            "description": (post.content or "")[:240],
+            "message": (post.content or "")[:240],
+            "severity": alert_severity,
+            "location": location_label,
+            "location_data": alert_location,
             "coordinates": {"lat": lat, "lon": lon},
             "url": "/app/community",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "community_verified",
+            "timestamp": now_iso,
         }
-        await ws_manager.broadcast_location_based(ws_payload, radius_km=radius_km)
-        summary["ws_broadcast"] = True
-        summary["push_sent"] = await push_manager.send_nearby_push(
-            lat,
-            lon,
-            {
-                "title": ws_payload["title"],
-                "body": ws_payload["body"],
-                "url": "/app/community",
-                "type": "community_post_verified",
-            },
-            radius_km=radius_km,
-            db=db,
-        )
+
+        if lat is not None and lon is not None:
+            await ws_manager.broadcast_location_based(ws_payload, radius_km=radius_km)
+            summary["ws_broadcast"] = True
+            summary["push_sent"] = await push_manager.send_nearby_push(
+                lat,
+                lon,
+                {
+                    "title": ws_payload["title"],
+                    "body": ws_payload["description"],
+                    "url": "/app/community",
+                    "type": "community_post_verified",
+                },
+                radius_km=radius_km,
+                db=db,
+            )
+        else:
+            summary["errors"].append("Skipped WS/push nearby delivery because post coordinates are missing")
     except Exception as exc:
         logger.warning("Community approval WS/Push dispatch failed for post=%s: %s", post.id, exc)
         summary["errors"].append(f"WS/Push dispatch failed: {exc}")
+
+    try:
+        in_app_recipients = []
+        for row in nearby_rows:
+            user = row["user"]
+            if not user.id or str(user.id) == str(post.user_id):
+                continue
+            if not _user_channel_enabled(user, "in_app", "app"):
+                continue
+            in_app_recipients.append(user)
+
+        # Deduplicate recipients by user id.
+        dedup_recipients = {str(user.id): user for user in in_app_recipients}
+        recipient_users = list(dedup_recipients.values())
+
+        summary["in_app"]["total"] = len(recipient_users)
+        if recipient_users:
+            ws_jobs = []
+            for user in recipient_users:
+                notification_id = str(uuid.uuid4())
+                notification_payload = {
+                    "id": notification_id,
+                    "user_id": user.id,
+                    "type": "alert",
+                    "title": f"Verified community {community_type.capitalize()} nearby",
+                    "message": message_text,
+                    "post_id": post.id,
+                    "from_user_id": "admin",
+                    "from_name": "Admin Team",
+                    "from_photo": None,
+                    "is_read": False,
+                    "timestamp": now_iso,
+                }
+
+                db.add(
+                    Notification(
+                        id=notification_id,
+                        user_id=user.id,
+                        type="alert",
+                        title=notification_payload["title"],
+                        message=notification_payload["message"],
+                        post_id=post.id,
+                        from_user_id="admin",
+                        from_name="Admin Team",
+                        from_photo=None,
+                        is_read=False,
+                    )
+                )
+                ws_jobs.append(
+                    ws_manager.notify_user(
+                        user.id,
+                        {
+                            "type": "in_app_notification",
+                            "notification": notification_payload,
+                        },
+                    )
+                )
+
+            summary["in_app"]["queued"] = len(recipient_users)
+            ws_results = await asyncio.gather(*ws_jobs, return_exceptions=True)
+            delivered_connections = 0
+            for idx, ws_res in enumerate(ws_results):
+                if isinstance(ws_res, Exception):
+                    summary["errors"].append(
+                        f"In-app websocket fanout failed for user {recipient_users[idx].id}: {ws_res}"
+                    )
+                    continue
+                delivered_connections += int(ws_res or 0)
+            summary["in_app"]["ws_delivered"] = delivered_connections
+    except Exception as exc:
+        logger.warning("Community approval in-app dispatch failed for post=%s: %s", post.id, exc)
+        summary["errors"].append(f"In-app dispatch failed: {exc}")
 
     return summary
 
@@ -1517,7 +1792,7 @@ async def update_community_post_verification(
         allowed = ", ".join(sorted(COMMUNITY_VERIFICATION_STATUS_META.keys()))
         raise HTTPException(status_code=422, detail=f"status must be one of: {allowed}")
 
-    location_meta = post.location if isinstance(post.location, dict) else {}
+    location_meta = copy.deepcopy(post.location) if isinstance(post.location, dict) else {}
     verification = _normalize_community_verification(location_meta, post.post_type)
 
     status_meta = COMMUNITY_VERIFICATION_STATUS_META[target_status]
@@ -1547,6 +1822,8 @@ async def update_community_post_verification(
     )
 
     notify_channels = _normalize_channel_list(body.notify_channels)
+    if target_status == "approved" and not notify_channels:
+        notify_channels = DEFAULT_COMMUNITY_APPROVAL_CHANNELS.copy()
     raw_radius = body.notify_radius_km if body.notify_radius_km is not None else DEFAULT_COMMUNITY_APPROVAL_RADIUS_KM
     try:
         notify_radius_km = float(raw_radius)
@@ -1607,6 +1884,7 @@ async def update_community_post_verification(
 
     location_meta["verification"] = verification
     post.location = location_meta
+    flag_modified(post, "location")
     post.is_public = target_status == "approved"
 
     user_notification_payload: Optional[Dict[str, Any]] = None

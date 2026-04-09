@@ -108,23 +108,23 @@ const AdminDashboard = () => {
     return getAuthHeadersForApi(API_URL, 'admin');
   };
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (forceRefresh = false) => {
     setIsRefreshing(true);
     try {
       const authHeaders = getAuthHeaders();
       const authFetch = { fetchOptions: { headers: authHeaders } };
       const [alertsRes, pendingRes, safetyRes, smsRes, incidentRes, smsLogRes, statsRes, logsRes, tgRes, bcRes, verificationRes] = await Promise.allSettled([
-        cachedFetchJson(`${API_URL}/admin/alerts`, { ttlMs: 30 * 1000, ...authFetch }),
-        cachedFetchJson(`${API_URL}/admin/alerts/pending`, { ttlMs: 30 * 1000, ...authFetch }),
-        cachedFetchJson(`${API_URL}/admin/safety/status`, { ttlMs: 30 * 1000, ...authFetch }),
-        cachedFetchJson(`${API_URL}/api/sms/status`, { ttlMs: 30 * 1000, ...authFetch }),
-        cachedFetchJson(`${API_URL}/admin/incidents?limit=20`, { ttlMs: 30 * 1000, ...authFetch }),
-        cachedFetchJson(`${API_URL}/api/sms/audit-log?limit=20`, { ttlMs: 30 * 1000, ...authFetch }),
-        cachedFetchJson(`${API_URL}/admin/stats`, { ttlMs: 30 * 1000, ...authFetch }),
-        cachedFetchJson(`${API_URL}/admin/logs?limit=10`, { ttlMs: 30 * 1000, ...authFetch }),
-        cachedFetchJson(`${API_URL}/admin/telegram/stats`, { ttlMs: 30 * 1000, ...authFetch }),
-        cachedFetchJson(`${API_URL}/admin/broadcast/channels`, { ttlMs: 30 * 1000, ...authFetch }),
-        cachedFetchJson(`${API_URL}/admin/community-verification/posts?status=all&limit=100`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/alerts`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/alerts/pending`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/safety/status`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/api/sms/status`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/incidents?limit=20`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/api/sms/audit-log?limit=20`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/stats`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/logs?limit=10`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/telegram/stats`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/broadcast/channels`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/community-verification/posts?status=all&limit=100`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
       ]);
       if (alertsRes.status === 'fulfilled') setAlerts(alertsRes.value?.alerts || alertsRes.value || []);
       if (pendingRes.status === 'fulfilled') setPendingAlerts(pendingRes.value?.pending_alerts || []);
@@ -181,7 +181,7 @@ const AdminDashboard = () => {
   const handleVerificationAction = async (postId, status) => {
     const adminComment = (verificationNotes[postId] || '').trim();
     const reportToUser = (verificationReports[postId] || '').trim();
-    const notifyConfig = verificationNotifyChannels[postId] || { sms: false, telegram: true };
+    const notifyConfig = verificationNotifyChannels[postId] || { sms: true, telegram: true };
     const notifyChannels = Object.entries(notifyConfig)
       .filter(([, enabled]) => Boolean(enabled))
       .map(([channel]) => channel);
@@ -213,13 +213,17 @@ const AdminDashboard = () => {
       if (status === 'approved' && delivery) {
         const smsStats = delivery?.sms || {};
         const tgStats = delivery?.telegram || {};
+        const inAppStats = delivery?.in_app || {};
+        const alertCenter = delivery?.alert_center || {};
         const smsText = smsStats?.requested ? `SMS ${smsStats?.sent || 0}/${smsStats?.total || 0}` : 'SMS skipped';
         const tgText = tgStats?.requested ? `Telegram ${tgStats?.sent || 0}/${tgStats?.total || 0}` : 'Telegram skipped';
-        setActionFeedback(`Community post approved and published. ${smsText} | ${tgText}`);
+        const inAppText = `In-app ${inAppStats?.queued || 0}/${inAppStats?.total || 0}`;
+        const alertText = alertCenter?.alert_id ? 'Alert Center updated' : 'Alert Center skipped';
+        setActionFeedback(`Community post approved and published. ${smsText} | ${tgText} | ${inAppText} | ${alertText}`);
       } else {
         setActionFeedback(`Community post updated: ${data?.verification?.status_label || status}`);
       }
-      await fetchData();
+      await fetchData(true);
     } catch (err) {
       setActionFeedback(`Error: ${err.message}`);
     } finally {
@@ -822,7 +826,7 @@ const AdminDashboard = () => {
 
                 const noteValue = verificationNotes[post.id] ?? verification?.admin_comment ?? '';
                 const reportValue = verificationReports[post.id] ?? verification?.report_to_user ?? '';
-                const notifyChannels = verificationNotifyChannels[post.id] || { sms: false, telegram: true };
+                const notifyChannels = verificationNotifyChannels[post.id] || { sms: true, telegram: true };
                 const notifyRadius = verificationNotifyRadiusKm[post.id] ?? 10;
 
                 return (
@@ -914,7 +918,7 @@ const AdminDashboard = () => {
                                 setVerificationNotifyChannels((prev) => ({
                                   ...prev,
                                   [post.id]: {
-                                    ...(prev[post.id] || { sms: false, telegram: true }),
+                                    ...(prev[post.id] || { sms: true, telegram: true }),
                                     sms: checked,
                                   },
                                 }));
@@ -932,7 +936,7 @@ const AdminDashboard = () => {
                                 setVerificationNotifyChannels((prev) => ({
                                   ...prev,
                                   [post.id]: {
-                                    ...(prev[post.id] || { sms: false, telegram: true }),
+                                    ...(prev[post.id] || { sms: true, telegram: true }),
                                     telegram: checked,
                                   },
                                 }));
