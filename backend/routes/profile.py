@@ -283,7 +283,16 @@ async def update_profile(
     if body.bio is not None:
         user.bio = body.bio[:500]
     if body.phone is not None:
-        user.phone = body.phone.strip() or None
+        raw_phone = body.phone.strip()
+        if raw_phone:
+            from sms_service import sms_service
+
+            normalized_phone = sms_service._normalize_recipient_e164(raw_phone)
+            if not normalized_phone:
+                raise HTTPException(status_code=422, detail="Invalid phone number")
+            user.phone = normalized_phone
+        else:
+            user.phone = None
     if body.notification_email is not None:
         user.notification_email = body.notification_email.strip().lower() or None
     if body.telegram_username is not None:

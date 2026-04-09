@@ -1164,7 +1164,9 @@ async def register_phone(req: PhoneRegistrationRequest, db: AsyncSession = Depen
     """Register a phone number for SMS alerts (in-memory + DB persistence)."""
     from database import User
 
-    normalized_phone = sms_service._normalize_e164(req.phone)
+    normalized_phone = sms_service._normalize_recipient_e164(req.phone)
+    if not normalized_phone:
+        raise HTTPException(status_code=422, detail="Invalid phone number")
     phone_registry.register(
         uid=req.uid,
         phone=normalized_phone,

@@ -127,7 +127,12 @@ class SMSService:
         if not digits_only:
             return ""
 
+        country_digits = "".join(ch for ch in self.default_country_code if ch.isdigit())
+
         if raw.startswith("+"):
+            # Heal legacy stored values like "+9876543210" (missing country code).
+            if len(digits_only) == 10 and country_digits and not digits_only.startswith(country_digits):
+                return f"+{country_digits}{digits_only}"
             return f"+{digits_only}"
 
         if digits_only.startswith("00") and len(digits_only) > 2:
@@ -135,7 +140,6 @@ class SMSService:
 
         # Common India/local format fallback: 10-digit mobile number.
         if len(digits_only) == 10:
-            country_digits = "".join(ch for ch in self.default_country_code if ch.isdigit())
             if country_digits:
                 return f"+{country_digits}{digits_only}"
 

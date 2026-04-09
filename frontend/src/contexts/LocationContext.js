@@ -259,12 +259,31 @@ export const LocationProvider = ({ children }) => {
   };
 
   const fetchNearbyAlerts = async (latitude, longitude, radiusKm = 50) => {
+    const fetchGlobalAlerts = async () => {
+      try {
+        const globalRes = await axios.get(`${BACKEND}/api/alerts`, { timeout: 10000 });
+        const globalAlerts = Array.isArray(globalRes?.data?.alerts) ? globalRes.data.alerts : [];
+        setAlerts(globalAlerts.slice(0, 50));
+      } catch {
+        setAlerts([]);
+      }
+    };
+
     try {
       const res = await axios.get(`${BACKEND}/api/location/nearby-alerts`, {
         params: { lat: latitude, lon: longitude, radius_km: radiusKm },
       });
-      setAlerts(res.data.alerts || []);
-    } catch { setAlerts([]); }
+      const nearbyAlerts = Array.isArray(res?.data?.alerts) ? res.data.alerts : [];
+      if (nearbyAlerts.length > 0) {
+        setAlerts(nearbyAlerts);
+        return;
+      }
+
+      // Fallback: show latest active alerts even when no geocoded matches are found.
+      await fetchGlobalAlerts();
+    } catch {
+      await fetchGlobalAlerts();
+    }
   };
 
   const clearLocation = () => {
