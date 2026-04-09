@@ -4,13 +4,17 @@ Admin API Routes for Alert Management, Users & Stats
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-from database import get_db, Alert, IncidentLog, User, CommunityReport, CommunityPost, AILog, UserReport
+from database import get_db, Alert, IncidentLog, User, CommunityReport, CommunityPost, AILog, UserReport, Notification
 from notifications import ws_manager
 from sqlalchemy import select, func
 import logging
 import uuid
+import json
+import asyncio
+import os
 from datetime import datetime, timezone, timedelta
 from firebase_auth import verify_firebase_token
+from ai.openai_client import ai_client, GOOGLE_MODEL_CHAT, OPENROUTER_CHAT_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,274 @@ async def require_admin_user(
 
 
 router = APIRouter(prefix="/admin", tags=["Admin"], dependencies=[Depends(require_admin_user)])
+
+REVIEW_REQUIRED_POST_TYPES = {"alert", "warning", "emergency"}
+COMMUNITY_APPROVAL_NOTIFY_CHANNELS = {"sms", "telegram"}
+DEFAULT_COMMUNITY_APPROVAL_RADIUS_KM = 10.0
+MAX_COMMUNITY_APPROVAL_RADIUS_KM = 50.0
+COMMUNITY_VERIFICATION_STATUS_META = {
+    "pending_admin_review": {"label": "Pending Admin Review", "progress": 25},
+    "in_review": {"label": "Under Review", "progress": 55},
+    "needs_info": {"label": "Need More Information", "progress": 40},
+    "approved": {"label": "Verified by Admin", "progress": 100},
+    "rejected": {"label": "Rejected", "progress": 100},
+    "not_required": {"label": "No Verification Needed", "progress": 100},
+}
+
+
+def _normalize_channel_list(channels: Optional[List[str]]) -> List[str]:
+    if not channels:
+        return []
+    normalized: List[str] = []
+    seen = set()
+    for channel in channels:
+        key = str(channel or "").strip().lower()
+        if key in COMMUNITY_APPROVAL_NOTIFY_CHANNELS and key not in seen:
+            seen.add(key)
+            normalized.append(key)
+    return normalized
+
+
+def _extract_lat_lon(location_meta: Dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
+    if not isinstance(location_meta, dict):
+        return None, None
+    lat_raw = location_meta.get("lat", location_meta.get("latitude"))
+    lon_raw = location_meta.get("lon", location_meta.get("longitude"))
+    try:
+        lat = float(lat_raw)
+        lon = float(lon_raw)
+    except (TypeError, ValueError):
+        return None, None
+    return lat, lon
+
+
+def _community_dispatch_text(post: CommunityPost, location_label: str) -> str:
+    post_type = str(post.post_type or "alert").strip().upper()
+    short_content = (post.content or "")[:180]
+    app_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return (
+        f"Suraksha Setu Verified {post_type} near {location_label}. "
+        f"{short_content} Open app: {app_url}/app/community"
+    )
+
+
+async def _dispatch_approved_community_post(
+    post: CommunityPost,
+    location_meta: Dict[str, Any],
+    channels: List[str],
+    radius_km: float,
+    db,
+) -> Dict[str, Any]:
+    """Send nearby community approval notifications and return channel delivery stats."""
+    lat, lon = _extract_lat_lon(location_meta)
+    location_label = (
+        location_meta.get("name")
+        or location_meta.get("city")
+        or location_meta.get("pincode")
+        or "your area"
+    )
+    summary: Dict[str, Any] = {
+        "radius_km": radius_km,
+        "channels_requested": channels,
+        "has_coordinates": lat is not None and lon is not None,
+        "sms": {"requested": "sms" in channels, "total": 0, "sent": 0, "failed": 0},
+        "telegram": {"requested": "telegram" in channels, "total": 0, "sent": 0, "failed": 0},
+        "ws_broadcast": False,
+        "push_sent": 0,
+        "errors": [],
+    }
+
+    if lat is None or lon is None:
+        summary["errors"].append("Post has no valid latitude/longitude for nearby notifications")
+        return summary
+
+    message_text = _community_dispatch_text(post, location_label)
+
+    if "sms" in channels:
+        try:
+            from sms_service import sms_service, phone_registry
+
+            recipients = await phone_registry.get_user_phones_near_from_db(
+                db_session=db,
+                lat=lat,
+                lon=lon,
+                radius_km=radius_km,
+            )
+            summary["sms"]["total"] = len(recipients)
+            if recipients:
+                sms_jobs = [sms_service.send_sms(row["phone"], message_text) for row in recipients]
+                sms_results = await asyncio.gather(*sms_jobs, return_exceptions=True)
+                sent_count = 0
+                for idx, sms_res in enumerate(sms_results):
+                    if isinstance(sms_res, Exception):
+                        summary["errors"].append(f"SMS error for {recipients[idx].get('phone')}: {sms_res}")
+                        continue
+                    if sms_res.get("success"):
+                        sent_count += 1
+                summary["sms"]["sent"] = sent_count
+                summary["sms"]["failed"] = len(recipients) - sent_count
+        except Exception as exc:
+            logger.warning("Community approval SMS dispatch failed for post=%s: %s", post.id, exc)
+            summary["errors"].append(f"SMS dispatch failed: {exc}")
+
+    if "telegram" in channels:
+        try:
+            from telegram_service import telegram_service
+            from utils.spatial_query import haversine_distance
+
+            if telegram_service.enabled:
+                tg_query = await db.execute(
+                    select(User).where(
+                        User.is_active == True,
+                        User.telegram_chat_id.isnot(None),
+                    )
+                )
+                tg_users = tg_query.scalars().all()
+                recipients: List[str] = []
+                for user in tg_users:
+                    user_loc = user.location if isinstance(user.location, dict) else {}
+                    u_lat, u_lon = _extract_lat_lon(user_loc)
+                    if u_lat is None or u_lon is None:
+                        continue
+
+                    user_channels = user.notification_channels if isinstance(user.notification_channels, dict) else {}
+                    if user_channels.get("telegram") is False:
+                        continue
+
+                    if haversine_distance(lat, lon, u_lat, u_lon) <= radius_km:
+                        recipients.append(user.telegram_chat_id)
+
+                summary["telegram"]["total"] = len(recipients)
+                if recipients:
+                    tg_jobs = [telegram_service.send_message(chat_id, message_text) for chat_id in recipients]
+                    tg_results = await asyncio.gather(*tg_jobs, return_exceptions=True)
+                    sent_count = 0
+                    for idx, tg_res in enumerate(tg_results):
+                        if isinstance(tg_res, Exception):
+                            summary["errors"].append(f"Telegram error for chat {recipients[idx]}: {tg_res}")
+                            continue
+                        if tg_res is True:
+                            sent_count += 1
+                    summary["telegram"]["sent"] = sent_count
+                    summary["telegram"]["failed"] = len(recipients) - sent_count
+            else:
+                summary["errors"].append("Telegram service is not configured")
+        except Exception as exc:
+            logger.warning("Community approval Telegram dispatch failed for post=%s: %s", post.id, exc)
+            summary["errors"].append(f"Telegram dispatch failed: {exc}")
+
+    try:
+        from notifications import push_manager
+
+        ws_payload = {
+            "type": "community_post_verified",
+            "id": post.id,
+            "post_type": post.post_type,
+            "title": f"Verified community {str(post.post_type or 'alert').capitalize()} nearby",
+            "body": (post.content or "")[:200],
+            "coordinates": {"lat": lat, "lon": lon},
+            "url": "/app/community",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        await ws_manager.broadcast_location_based(ws_payload, radius_km=radius_km)
+        summary["ws_broadcast"] = True
+        summary["push_sent"] = await push_manager.send_nearby_push(
+            lat,
+            lon,
+            {
+                "title": ws_payload["title"],
+                "body": ws_payload["body"],
+                "url": "/app/community",
+                "type": "community_post_verified",
+            },
+            radius_km=radius_km,
+            db=db,
+        )
+    except Exception as exc:
+        logger.warning("Community approval WS/Push dispatch failed for post=%s: %s", post.id, exc)
+        summary["errors"].append(f"WS/Push dispatch failed: {exc}")
+
+    return summary
+
+
+def _default_community_verification(post_type: str) -> dict:
+    normalized_type = (post_type or "general").strip().lower()
+    if normalized_type in REVIEW_REQUIRED_POST_TYPES:
+        meta = COMMUNITY_VERIFICATION_STATUS_META["pending_admin_review"]
+        return {
+            "requires_admin_review": True,
+            "status": "pending_admin_review",
+            "status_label": meta["label"],
+            "progress_percent": meta["progress"],
+            "message": "Submitted and waiting for admin verification.",
+            "admin_comment": None,
+            "report_to_user": None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "history": [],
+        }
+
+    meta = COMMUNITY_VERIFICATION_STATUS_META["not_required"]
+    return {
+        "requires_admin_review": False,
+        "status": "not_required",
+        "status_label": meta["label"],
+        "progress_percent": meta["progress"],
+        "message": "No verification required for this post type.",
+        "admin_comment": None,
+        "report_to_user": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "history": [],
+    }
+
+
+def _normalize_community_verification(location_meta: dict, post_type: str) -> dict:
+    defaults = _default_community_verification(post_type)
+    raw = location_meta.get("verification") if isinstance(location_meta, dict) else None
+    if not isinstance(raw, dict):
+        return defaults
+
+    merged = {**defaults, **raw}
+    if not isinstance(merged.get("history"), list):
+        merged["history"] = []
+    status = str(merged.get("status") or defaults["status"]).strip().lower()
+    if status not in COMMUNITY_VERIFICATION_STATUS_META:
+        status = defaults["status"]
+    status_meta = COMMUNITY_VERIFICATION_STATUS_META[status]
+
+    merged["status"] = status
+    merged["status_label"] = merged.get("status_label") or status_meta["label"]
+    try:
+        merged["progress_percent"] = int(merged.get("progress_percent", status_meta["progress"]))
+    except Exception:
+        merged["progress_percent"] = status_meta["progress"]
+
+    merged["progress_percent"] = max(0, min(100, merged["progress_percent"]))
+    merged["requires_admin_review"] = bool(merged.get("requires_admin_review", defaults["requires_admin_review"]))
+    return merged
+
+
+def _extract_post_image_analysis(post: CommunityPost, location_meta: dict) -> Optional[dict]:
+    from_location = location_meta.get("image_analysis") if isinstance(location_meta, dict) else None
+    if isinstance(from_location, dict):
+        return from_location
+
+    media_items = post.media if isinstance(post.media, list) else []
+    analyses: list[dict] = []
+    for media_item in media_items:
+        if not isinstance(media_item, dict):
+            continue
+        analysis = media_item.get("analysis")
+        if isinstance(analysis, dict):
+            nested = analysis.get("analysis")
+            if isinstance(nested, dict):
+                analyses.append(nested)
+            else:
+                analyses.append(analysis)
+
+    if not analyses:
+        return None
+    analyses.sort(key=lambda item: float(item.get("confidence", 0.0) or 0.0), reverse=True)
+    return analyses[0]
 
 
 # ==================== REQUEST MODELS ====================
@@ -100,6 +372,22 @@ class AlertUpdateRequest(BaseModel):
     retracted: Optional[bool] = None
 
 
+class CommunityPostVerificationRequest(BaseModel):
+    status: str  # pending_admin_review | in_review | needs_info | approved | rejected
+    progress_message: Optional[str] = None
+    admin_comment: Optional[str] = None
+    report_to_user: Optional[str] = None
+    notify_channels: Optional[List[str]] = None  # sms, telegram
+    notify_radius_km: Optional[float] = None
+
+
+class BroadcastGenerateRequest(BaseModel):
+    prompt: str
+    severity: str = "warning"
+    audience: str = "citizens in affected area"
+    language: str = "English"
+
+
 # ==================== ADMIN STATS ENDPOINT ====================
 
 @router.get("/stats")
@@ -144,6 +432,19 @@ async def get_admin_stats(db=Depends(get_db)):
         except Exception:
             pending_reports = 0
 
+        pending_post_verifications = 0
+        try:
+            verification_posts_q = await db.execute(
+                select(CommunityPost).where(CommunityPost.post_type.in_(list(REVIEW_REQUIRED_POST_TYPES))).limit(500)
+            )
+            for post in verification_posts_q.scalars().all():
+                location_meta = post.location if isinstance(post.location, dict) else {}
+                verification = _normalize_community_verification(location_meta, post.post_type)
+                if verification.get("status") in {"pending_admin_review", "in_review", "needs_info"}:
+                    pending_post_verifications += 1
+        except Exception:
+            pending_post_verifications = 0
+
         # Registered phones
         try:
             from sms_service import phone_registry
@@ -176,6 +477,7 @@ async def get_admin_stats(db=Depends(get_db)):
             "active_users": active_users,
             "total_posts": total_posts,
             "pending_reports": pending_reports,
+            "pending_post_verifications": pending_post_verifications,
             "registered_phones": registered_phones,
             "incidents": incidents,
             "ai_calls_today": ai_calls_today,
@@ -186,7 +488,8 @@ async def get_admin_stats(db=Depends(get_db)):
         return {
             "active_alerts": 0, "pending_alerts": 0, "total_alerts": 0,
             "total_users": 0, "active_users": 0, "total_posts": 0,
-            "pending_reports": 0, "registered_phones": 0, "incidents": 0,
+            "pending_reports": 0, "pending_post_verifications": 0,
+            "registered_phones": 0, "incidents": 0,
             "ai_calls_today": 0, "system_status": "operational",
         }
 
@@ -659,6 +962,81 @@ async def admin_multi_channel_broadcast(body: MultiChannelBroadcastRequest, db=D
         except Exception as e:
             results["websocket"] = {"enabled": False, "sent": 0, "total": 0, "failed": 0, "error": str(e)}
 
+    # Always create in-app notification records so users see broadcast messages in the bell icon.
+    try:
+        actor_uid = (_admin or {}).get("uid") or "admin"
+        actor_claims = (_admin or {}).get("firebase_claims") or {}
+        actor_name = (
+            actor_claims.get("name")
+            or (_admin or {}).get("name")
+            or (_admin or {}).get("email")
+            or "Admin Team"
+        )
+
+        users_q = await db.execute(select(User).where(User.is_active == True))
+        recipients = [u for u in users_q.scalars().all() if u.id and u.id not in {"anonymous", "You"}]
+        in_app_payloads: List[Dict[str, Any]] = []
+
+        for target_user in recipients:
+            notification_id = str(uuid.uuid4())
+            notification_payload = {
+                "id": notification_id,
+                "user_id": target_user.id,
+                "type": "broadcast",
+                "title": title[:500],
+                "message": message_text[:1500],
+                "post_id": None,
+                "from_user_id": actor_uid,
+                "from_name": actor_name,
+                "from_photo": None,
+                "is_read": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            db.add(
+                Notification(
+                    id=notification_id,
+                    user_id=target_user.id,
+                    type="broadcast",
+                    title=title[:500],
+                    message=message_text[:1500],
+                    post_id=None,
+                    from_user_id=actor_uid,
+                    from_name=actor_name,
+                    from_photo=None,
+                    is_read=False,
+                )
+            )
+            in_app_payloads.append(notification_payload)
+
+        await db.commit()
+
+        ws_delivered = 0
+        for entry in in_app_payloads:
+            ws_delivered += await ws_manager.notify_user(
+                entry["user_id"],
+                {
+                    "type": "in_app_notification",
+                    "notification": entry,
+                },
+            )
+
+        results["in_app"] = {
+            "enabled": True,
+            "sent": len(recipients),
+            "total": len(recipients),
+            "failed": 0,
+            "websocket_delivered": ws_delivered,
+        }
+    except Exception as e:
+        await db.rollback()
+        results["in_app"] = {
+            "enabled": False,
+            "sent": 0,
+            "total": 0,
+            "failed": 0,
+            "error": str(e),
+        }
+
     total_sent = sum(int(v.get("sent", 0)) for v in results.values())
     return {
         "success": True,
@@ -668,6 +1046,115 @@ async def admin_multi_channel_broadcast(body: MultiChannelBroadcastRequest, db=D
         "results": results,
         "total_sent": total_sent,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.post("/broadcast/generate")
+async def generate_broadcast_content(
+    body: BroadcastGenerateRequest,
+    _admin=Depends(verify_firebase_token),
+):
+    """Generate a detailed admin broadcast draft; prefers Google and falls back to OpenRouter."""
+    prompt = (body.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="prompt is required")
+
+    severity = (body.severity or "warning").strip().lower()
+    audience = (body.audience or "citizens in affected area").strip()
+    language = (body.language or "English").strip()
+
+    system_prompt = """
+You are a senior emergency communication officer for Suraksha Setu (India).
+Write clear, actionable, non-panicky public advisories.
+Your output must be STRICT JSON with keys:
+{
+  "title": "short headline",
+  "message": "detailed public advisory in 4-8 lines",
+  "key_actions": ["action 1", "action 2", "action 3"],
+  "admin_notes": "optional operator note"
+}
+Rules:
+- Keep factual tone and include immediate safety steps.
+- Mention uncertainty if information is unverified.
+- Avoid fear language, speculation, and political content.
+- Keep title under 90 characters.
+""".strip()
+
+    user_prompt = (
+        f"Severity: {severity}\n"
+        f"Audience: {audience}\n"
+        f"Language: {language}\n"
+        f"Context from admin: {prompt}\n"
+        "Generate the JSON now."
+    )
+
+    provider_errors = []
+    generated = None
+
+    if ai_client.google_client:
+        generated = await ai_client.chat_google(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=GOOGLE_MODEL_CHAT,
+            max_tokens=900,
+            temperature=0.35,
+            json_mode=True,
+        )
+        if generated.get("error"):
+            provider_errors.append(f"google: {generated.get('error')}")
+            generated = None
+
+    if generated is None:
+        generated = await ai_client.chat_openrouter(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=OPENROUTER_CHAT_MODEL,
+            max_tokens=900,
+            temperature=0.35,
+            json_mode=True,
+        )
+        if generated.get("error"):
+            provider_errors.append(f"openrouter: {generated.get('error')}")
+            generated = None
+
+    if generated is None:
+        detail = "; ".join(provider_errors) if provider_errors else "No AI text-generation provider available"
+        raise HTTPException(status_code=503, detail=detail)
+
+    raw = (generated.get("content") or "").strip()
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = {
+            "title": f"{severity.capitalize()} Community Update",
+            "message": raw,
+            "key_actions": [],
+            "admin_notes": "",
+        }
+
+    title = str(payload.get("title") or f"{severity.capitalize()} Community Update").strip()[:90]
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=500, detail="AI generated empty broadcast message")
+
+    key_actions = payload.get("key_actions")
+    if not isinstance(key_actions, list):
+        key_actions = []
+    key_actions = [str(item).strip() for item in key_actions if str(item).strip()][:5]
+
+    admin_notes = str(payload.get("admin_notes") or "").strip()
+
+    return {
+        "success": True,
+        "generated": {
+            "title": title,
+            "message": message,
+            "key_actions": key_actions,
+            "admin_notes": admin_notes,
+        },
+        "provider": generated.get("provider") or "openrouter",
+        "model": generated.get("model") or OPENROUTER_CHAT_MODEL,
+        "usage": generated.get("usage"),
     }
 
 
@@ -956,6 +1443,224 @@ async def get_pending_alerts(db = Depends(get_db)):
             }
             for a in alerts
         ]
+    }
+
+
+# ==================== COMMUNITY VERIFICATION ====================
+
+@router.get("/community-verification/posts")
+async def list_community_verification_posts(
+    status: str = "pending_admin_review",
+    limit: int = 50,
+    db=Depends(get_db),
+):
+    """List community alert/emergency posts with admin verification state."""
+    safe_limit = min(max(int(limit), 1), 200)
+
+    query = (
+        select(CommunityPost)
+        .where(CommunityPost.post_type.in_(list(REVIEW_REQUIRED_POST_TYPES)))
+        .order_by(CommunityPost.created_at.desc())
+        .limit(safe_limit)
+    )
+    result = await db.execute(query)
+    posts = result.scalars().all()
+
+    normalized_status = (status or "all").strip().lower()
+    response_posts: list[dict] = []
+    for post in posts:
+        location_meta = post.location if isinstance(post.location, dict) else {}
+        verification = _normalize_community_verification(location_meta, post.post_type)
+        if normalized_status != "all" and verification.get("status") != normalized_status:
+            continue
+
+        response_posts.append(
+            {
+                "id": post.id,
+                "user_id": post.user_id,
+                "type": post.post_type,
+                "content": post.content,
+                "media": post.media or [],
+                "tags": post.tags or [],
+                "location": location_meta,
+                "image_analysis": _extract_post_image_analysis(post, location_meta),
+                "is_public": bool(post.is_public),
+                "created_at": post.created_at.isoformat() if post.created_at else None,
+                "verification": verification,
+            }
+        )
+
+    return {
+        "total": len(response_posts),
+        "status": normalized_status,
+        "posts": response_posts,
+    }
+
+
+@router.put("/community-verification/posts/{post_id}")
+async def update_community_post_verification(
+    post_id: str,
+    body: CommunityPostVerificationRequest,
+    db=Depends(get_db),
+    _admin=Depends(verify_firebase_token),
+):
+    """Update admin verification status, comments, and user-facing report for a community post."""
+    post = await db.get(CommunityPost, post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    if (post.post_type or "").strip().lower() not in REVIEW_REQUIRED_POST_TYPES:
+        raise HTTPException(status_code=400, detail="This post type does not require admin verification")
+
+    target_status = (body.status or "").strip().lower()
+    if target_status not in COMMUNITY_VERIFICATION_STATUS_META:
+        allowed = ", ".join(sorted(COMMUNITY_VERIFICATION_STATUS_META.keys()))
+        raise HTTPException(status_code=422, detail=f"status must be one of: {allowed}")
+
+    location_meta = post.location if isinstance(post.location, dict) else {}
+    verification = _normalize_community_verification(location_meta, post.post_type)
+
+    status_meta = COMMUNITY_VERIFICATION_STATUS_META[target_status]
+    progress_message = (body.progress_message or "").strip()
+    if not progress_message:
+        if target_status == "approved":
+            progress_message = "This post has been verified by admin and is now visible to the community."
+        elif target_status == "rejected":
+            progress_message = "This post was rejected during admin verification and remains hidden."
+        elif target_status == "needs_info":
+            progress_message = "Admin requested more details to verify this post."
+        elif target_status == "in_review":
+            progress_message = "Admin is currently reviewing evidence and details."
+        else:
+            progress_message = "Post is queued for admin verification."
+
+    admin_comment = (body.admin_comment or "").strip()[:1500] or None
+    report_to_user = (body.report_to_user or "").strip()[:1500] or None
+
+    actor_uid = (_admin or {}).get("uid") or "admin"
+    actor_claims = (_admin or {}).get("firebase_claims") or {}
+    actor_name = (
+        actor_claims.get("name")
+        or (_admin or {}).get("name")
+        or (_admin or {}).get("email")
+        or "Admin Team"
+    )
+
+    notify_channels = _normalize_channel_list(body.notify_channels)
+    raw_radius = body.notify_radius_km if body.notify_radius_km is not None else DEFAULT_COMMUNITY_APPROVAL_RADIUS_KM
+    try:
+        notify_radius_km = float(raw_radius)
+    except (TypeError, ValueError):
+        notify_radius_km = DEFAULT_COMMUNITY_APPROVAL_RADIUS_KM
+    notify_radius_km = max(1.0, min(MAX_COMMUNITY_APPROVAL_RADIUS_KM, notify_radius_km))
+
+    delivery_summary: Optional[Dict[str, Any]] = None
+    if target_status == "approved":
+        delivery_summary = await _dispatch_approved_community_post(
+            post=post,
+            location_meta=location_meta,
+            channels=notify_channels,
+            radius_km=notify_radius_km,
+            db=db,
+        )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    history = verification.get("history") if isinstance(verification.get("history"), list) else []
+    history_entry = {
+        "status": target_status,
+        "status_label": status_meta["label"],
+        "message": progress_message,
+        "admin_comment": admin_comment,
+        "report_to_user": report_to_user,
+        "updated_by": actor_uid,
+        "updated_at": now_iso,
+    }
+    if target_status == "approved":
+        history_entry["notify_channels"] = notify_channels
+        history_entry["notify_radius_km"] = notify_radius_km
+        history_entry["delivery"] = delivery_summary
+    history.append(history_entry)
+
+    verification.update(
+        {
+            "requires_admin_review": True,
+            "status": target_status,
+            "status_label": status_meta["label"],
+            "progress_percent": status_meta["progress"],
+            "message": progress_message,
+            "admin_comment": admin_comment,
+            "report_to_user": report_to_user,
+            "updated_by": actor_uid,
+            "updated_at": now_iso,
+            "history": history,
+        }
+    )
+
+    if target_status == "approved":
+        verification["notify_channels"] = notify_channels
+        verification["notify_radius_km"] = notify_radius_km
+        verification["delivery"] = delivery_summary or {}
+    else:
+        verification.pop("notify_channels", None)
+        verification.pop("notify_radius_km", None)
+        verification.pop("delivery", None)
+
+    location_meta["verification"] = verification
+    post.location = location_meta
+    post.is_public = target_status == "approved"
+
+    user_notification_payload: Optional[Dict[str, Any]] = None
+    if post.user_id and post.user_id not in {"anonymous", "You"}:
+        user_message = report_to_user or admin_comment or progress_message
+        notification_id = str(uuid.uuid4())
+        user_notification_payload = {
+            "id": notification_id,
+            "user_id": post.user_id,
+            "type": "admin_review",
+            "title": f"Post verification: {status_meta['label']}",
+            "message": user_message,
+            "post_id": post.id,
+            "from_user_id": actor_uid,
+            "from_name": actor_name,
+            "from_photo": None,
+            "is_read": False,
+            "timestamp": now_iso,
+        }
+        db.add(
+            Notification(
+                id=notification_id,
+                user_id=post.user_id,
+                type="admin_review",
+                title=f"Post verification: {status_meta['label']}",
+                message=user_message,
+                post_id=post.id,
+                from_user_id=actor_uid,
+                from_name=actor_name,
+                from_photo=None,
+                is_read=False,
+            )
+        )
+
+    await db.commit()
+
+    if user_notification_payload:
+        try:
+            await ws_manager.notify_user(
+                post.user_id,
+                {
+                    "type": "in_app_notification",
+                    "notification": user_notification_payload,
+                },
+            )
+        except Exception as ws_exc:
+            logger.debug("Verification notification websocket fanout failed: %s", ws_exc)
+
+    return {
+        "success": True,
+        "post_id": post.id,
+        "is_public": bool(post.is_public),
+        "verification": verification,
+        "delivery": delivery_summary,
     }
 
 

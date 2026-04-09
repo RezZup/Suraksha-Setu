@@ -25,6 +25,7 @@ export const useWebSocket = (url, options = {}) => {
   const reconnectTimeoutRef = useRef(null);
   const heartbeatIntervalRef = useRef(null);
   const locationRef = useRef(null);
+  const manualCloseRef = useRef(false);
 
   /**
    * Send message to WebSocket server
@@ -106,13 +107,24 @@ export const useWebSocket = (url, options = {}) => {
    * Connect to WebSocket server
    */
   const connect = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (!url) {
+      return;
+    }
+
+    if (
+      wsRef.current
+      && (
+        wsRef.current.readyState === WebSocket.OPEN
+        || wsRef.current.readyState === WebSocket.CONNECTING
+      )
+    ) {
       console.log('WebSocket already connected');
       return;
     }
 
     try {
       console.log('Connecting to WebSocket:', url);
+      manualCloseRef.current = false;
       wsRef.current = new WebSocket(url);
 
       wsRef.current.onopen = () => {
@@ -160,7 +172,9 @@ export const useWebSocket = (url, options = {}) => {
       };
 
       wsRef.current.onerror = (error) => {
-        console.error('WebSocket error:', error);
+        if (!manualCloseRef.current) {
+          console.error('WebSocket error:', error);
+        }
         // Don't show error toast - will handle in onclose if needed
         if (onError) onError(error);
       };
@@ -173,7 +187,7 @@ export const useWebSocket = (url, options = {}) => {
         if (onDisconnect) onDisconnect();
 
         // Attempt reconnection with exponential backoff
-        if (autoReconnect && reconnectAttempts < maxReconnectAttempts) {
+        if (!manualCloseRef.current && autoReconnect && reconnectAttempts < maxReconnectAttempts) {
           // Exponential backoff: 3s, 6s, 12s, 24s, 48s (max 30s)
           const backoffDelay = Math.min(
             reconnectInterval * Math.pow(2, reconnectAttempts),
@@ -198,6 +212,8 @@ export const useWebSocket = (url, options = {}) => {
    * Disconnect from WebSocket server
    */
   const disconnect = useCallback(() => {
+    manualCloseRef.current = true;
+
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
@@ -217,6 +233,13 @@ export const useWebSocket = (url, options = {}) => {
    * Connect on mount, disconnect on unmount
    */
   useEffect(() => {
+    if (!url) {
+      disconnect();
+      return () => {
+        disconnect();
+      };
+    }
+
     connect();
 
     return () => {

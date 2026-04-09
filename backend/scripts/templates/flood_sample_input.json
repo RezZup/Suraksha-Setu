@@ -1,0 +1,12 @@
+{
+  "lat": 19.076,
+  "lon": 72.877,
+  "casualties": 0,
+  "affected_population": 2500,
+  "source": "GDACS",
+  "status": "active",
+  "location": "Mumbai",
+  "month": 7,
+  "day_of_year": 191,
+  "is_monsoon": 1
+}

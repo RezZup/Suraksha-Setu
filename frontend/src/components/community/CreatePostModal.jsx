@@ -572,6 +572,11 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
                 {selectedPostType.label}
               </Badge>
             )}
+            {(postType === 'alert' || postType === 'emergency') && (
+              <span className="text-xs text-amber-700 dark:text-amber-300">
+                This post will be reviewed by admin before it becomes public.
+              </span>
+            )}
           </div>
 
           {/* AI Block Warning */}

@@ -34,6 +34,7 @@ import CommentSection from './CommentSection';
 import DirectMessagePanel from './DirectMessagePanel';
 import { cn } from "@/lib/utils";
 import { toast } from 'sonner';
+import { getAuthHeadersForApi } from '@/utils/authHeaders';
 
 const BADGE_STYLE = {
   Guardian:  'bg-purple-100 text-purple-700 border-purple-200',
@@ -53,6 +54,38 @@ const AUTHENTICITY_LABEL = {
   likely_real: 'Likely real',
   uncertain: 'Unverified',
   suspected_fake: 'Possible fake',
+};
+
+const VERIFICATION_STYLE = {
+  pending_admin_review: {
+    badge: 'bg-amber-100 text-amber-700 border-amber-300',
+    bar: 'bg-amber-500',
+  },
+  in_review: {
+    badge: 'bg-blue-100 text-blue-700 border-blue-300',
+    bar: 'bg-blue-500',
+  },
+  needs_info: {
+    badge: 'bg-orange-100 text-orange-700 border-orange-300',
+    bar: 'bg-orange-500',
+  },
+  approved: {
+    badge: 'bg-emerald-100 text-emerald-700 border-emerald-300',
+    bar: 'bg-emerald-600',
+  },
+  rejected: {
+    badge: 'bg-rose-100 text-rose-700 border-rose-300',
+    bar: 'bg-rose-600',
+  },
+};
+
+const VERIFICATION_LABEL = {
+  pending_admin_review: 'Pending Admin Review',
+  in_review: 'Under Review',
+  needs_info: 'Need More Information',
+  approved: 'Verified by Admin',
+  rejected: 'Rejected',
+  not_required: 'No Verification Needed',
 };
 
 const CommunityPost = ({ 
@@ -81,6 +114,7 @@ const CommunityPost = ({
   const [reportReason, setReportReason] = useState('');
   const [reportDescription, setReportDescription] = useState('');
   const [submittingReport, setSubmittingReport] = useState(false);
+  const getAuthHeaders = () => getAuthHeadersForApi(process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000', 'citizen');
 
   // Sync like count from parent when the post prop updates (e.g. after re-fetch)
   React.useEffect(() => {
@@ -129,7 +163,10 @@ const CommunityPost = ({
     setResolving(true);
     try {
       const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api';
-      const res = await fetch(`${API_URL}/community/posts/${post.id}/resolve?resolved=${newResolved}&user_id=${encodeURIComponent(currentUserId || '')}`, { method: 'POST' });
+      const res = await fetch(`${API_URL}/community/posts/${post.id}/resolve?resolved=${newResolved}&user_id=${encodeURIComponent(currentUserId || '')}`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
       if (!res.ok) {
         setIsResolved(!newResolved);
         toast.error('Could not update status. Please try again.');
@@ -154,7 +191,7 @@ const CommunityPost = ({
       const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api';
       const res = await fetch(`${API_URL}/community/report`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
           reporter_id: currentUserId,
           reporter_name: currentUserName || 'Community Member',
@@ -211,6 +248,28 @@ const CommunityPost = ({
   const postGeneratedDescription = postImageAnalysis
     ? (postImageAnalysis.self_generated_description || postImageAnalysis.description || '')
     : '';
+  const verification = post.verification || {};
+  const requiresAdminReview = Boolean(
+    verification.requires_admin_review ?? post.verification_requires_admin_review
+  );
+  const verificationStatus = String(
+    verification.status || post.verification_status || ''
+  ).toLowerCase();
+  const verificationProgress = Math.max(
+    0,
+    Math.min(
+      100,
+      Number(verification.progress_percent ?? post.verification_progress ?? 0) || 0
+    )
+  );
+  const verificationLabel = verification.status_label || VERIFICATION_LABEL[verificationStatus] || 'Verification';
+  const verificationStyle = VERIFICATION_STYLE[verificationStatus] || {
+    badge: 'bg-slate-100 text-slate-700 border-slate-300',
+    bar: 'bg-slate-500',
+  };
+  const verificationMessage = verification.message || '';
+  const adminComment = post.admin_comment || verification.admin_comment;
+  const adminReport = post.admin_report || verification.report_to_user;
   const showGeneratedDescription = (
     postGeneratedDescription
     && postGeneratedDescription.trim().toLowerCase() !== (post.content || '').trim().toLowerCase()
@@ -271,6 +330,11 @@ const CommunityPost = ({
                     {isResolved && (
                       <Badge className="text-xs bg-green-100 text-green-700 border border-green-300">
                         ✓ Resolved
+                      </Badge>
+                    )}
+                    {requiresAdminReview && verificationStatus === 'approved' && (
+                      <Badge className="text-xs bg-emerald-100 text-emerald-700 border border-emerald-300">
+                        ✓ Admin Verified
                       </Badge>
                     )}
                   </div>
@@ -347,6 +411,41 @@ const CommunityPost = ({
               <h3 className="font-semibold text-base mb-2">{post.title}</h3>
             )}
             <p className="text-sm whitespace-pre-wrap">{post.content}</p>
+
+            {requiresAdminReview && (
+              <div className="mt-3 p-3 rounded-lg border bg-slate-50/80 dark:bg-slate-900/20">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">Admin Verification Progress</p>
+                  <Badge className={cn('text-[10px] border', verificationStyle.badge)}>
+                    {verificationLabel}
+                  </Badge>
+                </div>
+                <div className="mt-2 h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                  <div
+                    className={cn('h-full transition-all', verificationStyle.bar)}
+                    style={{ width: `${verificationProgress}%` }}
+                  />
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {verificationMessage || 'Your post has entered the admin verification queue.'}
+                </p>
+                {adminComment && (
+                  <p className="mt-2 text-xs text-blue-700 dark:text-blue-300">
+                    Admin comment: {adminComment}
+                  </p>
+                )}
+                {adminReport && (
+                  <p className="mt-1 text-xs text-rose-700 dark:text-rose-300">
+                    Admin report: {adminReport}
+                  </p>
+                )}
+                {!post.is_public && (
+                  <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
+                    This post is visible to you and admins until verification is approved.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* AI Image Analysis Badge */}
             {postImageAnalysis && (

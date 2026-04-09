@@ -3,7 +3,7 @@ import os
 import json
 import asyncio
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from fastapi import WebSocket
 
 # Push Notification Imports
@@ -167,6 +167,8 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         self.client_locations: Dict[str, Dict[str, Any]] = {}
         self.sent_alerts: Dict[str, set] = {}
+        self.client_user: Dict[str, str] = {}
+        self.user_connections: Dict[str, Set[str]] = {}
 
     async def connect(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
@@ -185,7 +187,58 @@ class ConnectionManager:
         self.active_connections.pop(client_id, None)
         self.client_locations.pop(client_id, None)
         self.sent_alerts.pop(client_id, None)
+
+        user_id = self.client_user.pop(client_id, None)
+        if user_id:
+            user_clients = self.user_connections.get(user_id)
+            if user_clients:
+                user_clients.discard(client_id)
+                if not user_clients:
+                    self.user_connections.pop(user_id, None)
+
         logger.info(f"WS Client disconnected: {client_id}")
+
+    def subscribe_user(self, client_id: str, user_id: str):
+        """Associate a websocket client with an authenticated app user for targeted notifications."""
+        if client_id not in self.active_connections:
+            return
+
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return
+
+        old_user_id = self.client_user.get(client_id)
+        if old_user_id and old_user_id != normalized_user_id:
+            old_set = self.user_connections.get(old_user_id)
+            if old_set:
+                old_set.discard(client_id)
+                if not old_set:
+                    self.user_connections.pop(old_user_id, None)
+
+        self.client_user[client_id] = normalized_user_id
+        self.user_connections.setdefault(normalized_user_id, set()).add(client_id)
+
+    async def notify_user(self, user_id: str, message: Dict[str, Any]) -> int:
+        """Send a message to all websocket connections subscribed to a specific user id."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return 0
+
+        target_clients = list(self.user_connections.get(normalized_user_id, set()))
+        if not target_clients:
+            return 0
+
+        delivered = 0
+        for client_id in target_clients:
+            connection = self.active_connections.get(client_id)
+            if not connection:
+                continue
+            try:
+                await connection.send_json(message)
+                delivered += 1
+            except Exception:
+                self.disconnect(client_id)
+        return delivered
 
     def set_client_location(self, client_id: str, location: Dict[str, Any]):
         self.client_locations[client_id] = location

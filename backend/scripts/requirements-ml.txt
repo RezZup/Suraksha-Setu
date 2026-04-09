@@ -1,0 +1,14 @@
+# Dedicated dependencies for offline/CI model training jobs.
+# Keep this separate from backend runtime requirements to avoid bloating API deployments.
+
+numpy>=2.0.0
+pandas>=2.2.0
+scikit-learn>=1.5.0
+joblib>=1.4.0
+sqlalchemy>=2.0.0
+python-dateutil>=2.9.0
+
+# Optional (uncomment if your training environment supports it)
+# xgboost>=2.1.0
+# lightgbm>=4.5.0
+# pyarrow>=16.0.0

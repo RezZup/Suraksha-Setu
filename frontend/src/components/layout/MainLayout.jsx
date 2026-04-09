@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Link, useLocation as useRouterLocation, Outlet, useNavigate } from 'react-router-dom';
 import { useLocation } from '@/contexts/LocationContext';
 import { 
@@ -38,6 +38,8 @@ import { useAuth } from '@/contexts/AuthContext';
 import BrandWatermark from '@/components/layout/BrandWatermark';
 import LanguageSwitcher from '@/components/LanguageSwitcher';
 import { useTranslation } from 'react-i18next';
+import { getAuthHeadersForApi } from '@/utils/authHeaders';
+import useWebSocket from '@/hooks/useWebSocket';
 
 const SidebarItem = ({ icon: Icon, label, path, active, collapsed }) => (
   <Link 
@@ -72,29 +74,91 @@ const MainLayout = () => {
   // Community notifications
   const [communityNotifs, setCommunityNotifs] = useState([]);
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
-  const COMMUNITY_API = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api/community';
+  const [notifFilter, setNotifFilter] = useState('all');
+  const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+  const COMMUNITY_API = `${BACKEND}/api/community`;
+  const currentUserId = user?.id || user?.uid;
+  const bellSocketClientIdRef = useRef(`bell_${Math.random().toString(36).slice(2, 12)}`);
+
+  const fetchBellNotifications = useCallback(async () => {
+    if (!currentUserId) return;
+    try {
+      const res = await fetch(`${COMMUNITY_API}/notifications/${currentUserId}?limit=20`, {
+        headers: getAuthHeadersForApi(BACKEND, 'citizen'),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCommunityNotifs(data.notifications || []);
+        setUnreadNotifCount(data.unread_count || 0);
+      }
+    } catch (e) {
+      // silent
+    }
+  }, [BACKEND, COMMUNITY_API, currentUserId]);
+
+  const handleBellSocketMessage = useCallback((message) => {
+    if (!message || !currentUserId) return;
+
+    if (message.type === 'in_app_notification' && message.notification) {
+      const incoming = message.notification;
+      if (String(incoming.user_id || '') !== String(currentUserId)) return;
+
+      setCommunityNotifs((prev) => {
+        if (prev.some((item) => item.id === incoming.id)) return prev;
+        return [incoming, ...prev].slice(0, 30);
+      });
+
+      if (!incoming.is_read) {
+        setUnreadNotifCount((prev) => prev + 1);
+      }
+    }
+
+    if (message.type === 'in_app_refresh') {
+      fetchBellNotifications();
+    }
+  }, [currentUserId, fetchBellNotifications]);
+
+  const bellSocketUrl = currentUserId
+    ? `${BACKEND.replace('http://', 'ws://').replace('https://', 'wss://')}/api/ws/${bellSocketClientIdRef.current}_${encodeURIComponent(currentUserId)}`
+    : null;
+
+  const {
+    isConnected: bellSocketConnected,
+    sendMessage: sendBellSocketMessage,
+  } = useWebSocket(bellSocketUrl, {
+    onMessage: handleBellSocketMessage,
+    autoReconnect: true,
+    reconnectInterval: 2000,
+    maxReconnectAttempts: 12,
+  });
 
   useEffect(() => {
-    if (!user?.id) return;
-    const fetchNotifs = async () => {
-      try {
-        const res = await fetch(`${COMMUNITY_API}/notifications/${user.id}?limit=10`);
-        if (res.ok) {
-          const data = await res.json();
-          setCommunityNotifs(data.notifications || []);
-          setUnreadNotifCount(data.unread_count || 0);
-        }
-      } catch (e) { /* silent */ }
-    };
-    fetchNotifs();
-    const iv = setInterval(fetchNotifs, 30000);
+    if (!currentUserId) {
+      setCommunityNotifs([]);
+      setUnreadNotifCount(0);
+      return;
+    }
+
+    fetchBellNotifications();
+    const iv = setInterval(fetchBellNotifications, 30000);
     return () => clearInterval(iv);
-  }, [user?.id]);
+  }, [currentUserId, fetchBellNotifications]);
+
+  useEffect(() => {
+    if (!currentUserId || !bellSocketConnected) return;
+    sendBellSocketMessage({
+      type: 'subscribe_user',
+      user_id: currentUserId,
+    });
+  }, [currentUserId, bellSocketConnected, sendBellSocketMessage]);
 
   const markAllNotifsRead = async () => {
-    if (!user?.id || unreadNotifCount === 0) return;
+    if (!currentUserId || unreadNotifCount === 0) return;
     try {
-      await fetch(`${COMMUNITY_API}/notifications/read-all/${user.id}`, { method: 'POST' });
+      await fetch(`${COMMUNITY_API}/notifications/read-all/${currentUserId}`, {
+        method: 'POST',
+        headers: getAuthHeadersForApi(BACKEND, 'citizen'),
+      });
       setCommunityNotifs(n => n.map(x => ({ ...x, is_read: true })));
       setUnreadNotifCount(0);
     } catch (e) { /* silent */ }
@@ -102,7 +166,7 @@ const MainLayout = () => {
 
   // ── Push notification registration (for proximity community alerts) ───────
   useEffect(() => {
-    if (!user?.id) return;
+    if (!currentUserId) return;
     const registerPush = async () => {
       try {
         if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
@@ -110,7 +174,6 @@ const MainLayout = () => {
         const perm = await Notification.requestPermission();
         if (perm !== 'granted') return;
         // Get VAPID public key
-        const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
         const keyRes = await fetch(`${BACKEND}/api/push/vapid-public-key`);
         if (!keyRes.ok) return;
         const { public_key } = await keyRes.json();
@@ -135,12 +198,12 @@ const MainLayout = () => {
         await fetch(`${BACKEND}/api/notifications/subscribe`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subscription: sub.toJSON(), user_id: user.id, user_lat: lat, user_lon: lon }),
+          body: JSON.stringify({ subscription: sub.toJSON(), user_id: currentUserId, user_lat: lat, user_lon: lon }),
         });
       } catch (e) { /* silent — push not critical */ }
     };
     registerPush();
-  }, [user?.id]);
+  }, [currentUserId, BACKEND]);
 
   // Close alerts dropdown when clicking outside
   useEffect(() => {
@@ -175,6 +238,82 @@ const MainLayout = () => {
       citizen: t('role.citizen')
     };
     return labels[type] || t('role.user');
+  };
+
+  const notificationFilters = [
+    { key: 'all', label: 'All' },
+    { key: 'messages', label: 'Messages' },
+    { key: 'alerts', label: 'Alerts' },
+    { key: 'broadcasts', label: 'Broadcasts' },
+  ];
+
+  const getNotificationCategory = (notif) => {
+    const type = String(notif?.type || '').toLowerCase();
+    if (['dm', 'direct_message', 'message', 'comment', 'reply', 'like'].includes(type)) {
+      return 'messages';
+    }
+    if (['broadcast', 'admin_broadcast'].includes(type)) {
+      return 'broadcasts';
+    }
+    return 'alerts';
+  };
+
+  const filteredCommunityNotifs = useMemo(() => {
+    if (notifFilter === 'all') return communityNotifs;
+    return communityNotifs.filter((n) => getNotificationCategory(n) === notifFilter);
+  }, [communityNotifs, notifFilter]);
+
+  const visibleSystemAlerts = useMemo(() => {
+    if (notifFilter !== 'all' && notifFilter !== 'alerts') return [];
+    return (alerts || []).slice(0, 5);
+  }, [alerts, notifFilter]);
+
+  const resolveNotifDestination = (notif) => {
+    const type = String(notif?.type || '').toLowerCase();
+    if (['dm', 'direct_message', 'message'].includes(type)) {
+      const params = new URLSearchParams({ dm: '1' });
+      if (notif?.from_user_id) params.set('partner_id', String(notif.from_user_id));
+      if (notif?.from_name) params.set('partner_name', String(notif.from_name));
+      if (notif?.from_photo) params.set('partner_photo', String(notif.from_photo));
+      if (notif?.post_id) params.set('post_id', String(notif.post_id));
+      if (notif?.message) params.set('post_snippet', String(notif.message).slice(0, 180));
+      return `/app/community?${params.toString()}`;
+    }
+    if (['broadcast', 'admin_broadcast', 'admin_review', 'system_alert', 'alert'].includes(type)) {
+      return '/app/alerts';
+    }
+    return '/app/community';
+  };
+
+  const handleNotificationClick = async (notif) => {
+    if (!notif) return;
+
+    if (currentUserId && notif.id && !notif.is_read) {
+      try {
+        await fetch(`${COMMUNITY_API}/notifications/${notif.id}/read`, {
+          method: 'POST',
+          headers: getAuthHeadersForApi(BACKEND, 'citizen'),
+        });
+      } catch (e) {
+        // silent
+      }
+      setCommunityNotifs((prev) => prev.map((item) => (item.id === notif.id ? { ...item, is_read: true } : item)));
+      setUnreadNotifCount((prev) => Math.max(0, prev - 1));
+    }
+
+    navigate(resolveNotifDestination(notif));
+    setShowAlertsDropdown(false);
+  };
+
+  const renderNotifIcon = (notifType) => {
+    const type = String(notifType || '').toLowerCase();
+    if (type === 'comment') return <MessageSquare className="w-3 h-3 text-blue-500 shrink-0" />;
+    if (type === 'reply') return <MessageSquare className="w-3 h-3 text-indigo-500 shrink-0" />;
+    if (type === 'like') return <Heart className="w-3 h-3 text-red-500 shrink-0" />;
+    if (['dm', 'direct_message', 'message'].includes(type)) return <MessageSquare className="w-3 h-3 text-emerald-500 shrink-0" />;
+    if (['broadcast', 'admin_broadcast'].includes(type)) return <Bell className="w-3 h-3 text-orange-500 shrink-0" />;
+    if (type === 'admin_review') return <ShieldAlert className="w-3 h-3 text-violet-500 shrink-0" />;
+    return <Bell className="w-3 h-3 text-muted-foreground shrink-0" />;
   };
 
   // Base navigation items for all users (citizen)
@@ -539,25 +678,43 @@ const MainLayout = () => {
                     </div>
                   </div>
 
+                  <div className="px-3 py-2 border-b bg-muted/20 flex flex-wrap gap-1.5">
+                    {notificationFilters.map((filter) => (
+                      <button
+                        key={filter.key}
+                        type="button"
+                        onClick={() => setNotifFilter(filter.key)}
+                        className={`px-2 py-1 rounded-full text-[10px] font-semibold transition-colors ${
+                          notifFilter === filter.key
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-background text-muted-foreground hover:text-foreground hover:bg-muted'
+                        }`}
+                      >
+                        {filter.label}
+                      </button>
+                    ))}
+                    {!bellSocketConnected && currentUserId && (
+                      <span className="ml-auto text-[10px] text-muted-foreground">Live reconnecting...</span>
+                    )}
+                  </div>
+
                   <div className="max-h-[420px] overflow-y-auto scrollbar-thin">
                     {/* Community notifications */}
-                    {communityNotifs.length > 0 && (
+                    {filteredCommunityNotifs.length > 0 && (
                       <div>
                         <div className="px-3 py-1.5 bg-muted/50 border-b">
-                          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Community Activity</span>
+                          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Recent Activity</span>
                         </div>
-                        {communityNotifs.map((n) => (
+                        {filteredCommunityNotifs.map((n) => (
                           <div
                             key={n.id}
                             className={`p-3 border-b hover:bg-muted/40 cursor-pointer transition-colors flex items-start gap-3 ${!n.is_read ? 'bg-blue-50/60 dark:bg-blue-900/10' : ''}`}
-                            onClick={() => { navigate('/app/community'); setShowAlertsDropdown(false); }}
+                            onClick={() => handleNotificationClick(n)}
                           >
                             <div className={`mt-1 w-2 h-2 rounded-full shrink-0 ${!n.is_read ? 'bg-blue-500' : 'bg-transparent'}`} />
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-1.5 mb-0.5">
-                                {n.type === 'comment' && <MessageSquare className="w-3 h-3 text-blue-500 shrink-0" />}
-                                {n.type === 'reply' && <MessageSquare className="w-3 h-3 text-indigo-500 shrink-0" />}
-                                {n.type === 'like' && <Heart className="w-3 h-3 text-red-500 shrink-0" />}
+                                {renderNotifIcon(n.type)}
                                 <p className="text-xs font-semibold text-foreground truncate">{n.title}</p>
                               </div>
                               <p className="text-[11px] text-muted-foreground line-clamp-2">{n.message}</p>
@@ -571,12 +728,12 @@ const MainLayout = () => {
                     )}
 
                     {/* System Alerts */}
-                    {alerts && alerts.length > 0 && (
+                    {visibleSystemAlerts.length > 0 && (
                       <div>
                         <div className="px-3 py-1.5 bg-muted/50 border-b">
                           <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Disaster Alerts</span>
                         </div>
-                        {alerts.slice(0, 5).map((alert, idx) => (
+                        {visibleSystemAlerts.map((alert, idx) => (
                           <div
                             key={alert.id || idx}
                             className="p-3 hover:bg-muted/50 cursor-pointer transition-colors border-b last:border-0"
@@ -604,7 +761,7 @@ const MainLayout = () => {
                     )}
 
                     {/* Empty state */}
-                    {(!alerts || alerts.length === 0) && communityNotifs.length === 0 && (
+                    {visibleSystemAlerts.length === 0 && filteredCommunityNotifs.length === 0 && (
                       <div className="p-8 text-center text-muted-foreground">
                         <Bell className="w-8 h-8 mx-auto mb-2 opacity-30" />
                         <p className="text-sm font-medium">All caught up!</p>

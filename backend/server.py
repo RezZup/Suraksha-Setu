@@ -987,6 +987,18 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                         },
                         websocket,
                     )
+                elif msg_type == "subscribe_user":
+                    user_id = str(message.get("user_id") or "").strip()
+                    if user_id:
+                        ws_manager.subscribe_user(client_id, user_id)
+                        await ws_manager.send_personal_message(
+                            {
+                                "type": "user_subscribed",
+                                "status": "ok",
+                                "user_id": user_id,
+                            },
+                            websocket,
+                        )
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect:

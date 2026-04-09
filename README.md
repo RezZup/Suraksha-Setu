@@ -12,7 +12,7 @@
 ## 🌟 Key Features
 
 ### 🗺️ Real-Time Monitoring & Alerts
-- **Multi-source Data Ingestion** — USGS Earthquake, CPCB AQI, MOSDAC Satellite (3-layer)
+- **Multi-source Data Ingestion** — USGS Earthquake, GDACS disaster feed, CPCB/OpenWeather AQI-weather, MOSDAC Satellite (3-layer)
 - **Deterministic Risk Engine** — Rule-based tsunami, flood, cyclone, AQI hazard assessment
 - **Alert Safeguards** — Threshold gating, confidence scoring, human-in-the-loop for medium-risk
 - **One-Click Retraction** — False positive correction with SMS/push retraction messages
@@ -81,7 +81,9 @@ graph TB
 
         subgraph Ingest["Data Ingestion"]
             USGS["USGS Earthquakes"]
+            GDACS["GDACS Disaster Feed"]
             CPCB["CPCB AQI"]
+            WX["Weather/AQI Providers"]
             MOS["MOSDAC 3-Layer"]
         end
     end
@@ -132,7 +134,9 @@ graph TB
     AS --> NF
 
     USGS --> PG
+    GDACS --> PG
     CPCB --> PG
+    WX --> PG
     MOS --> MK
     MOS --> PG
 
@@ -233,7 +237,7 @@ graph LR
 | **AI/ML** | OpenAI GPT-4o/4o-mini, Whisper, Vision, Embeddings (text-embedding-3-small), TTS |
 | **Database** | PostgreSQL (prod) / SQLite (dev), Redis (caching + rate limiting) |
 | **Auth** | JWT, Firebase Auth |
-| **Data Sources** | USGS, CPCB, ISRO MOSDAC, OpenWeatherMap, IMD |
+| **Data Sources** | USGS, GDACS, CPCB, ISRO MOSDAC, OpenWeather/Open-Meteo, IMD (where available) |
 | **Notifications** | WebSocket, Web Push (VAPID), SMS (Twilio-ready) |
 | **Deployment** | Render (Backend), Firebase Hosting (Frontend), Alembic (Migrations) |
 
@@ -339,8 +343,8 @@ Visit `http://localhost:3000`
 |--------|----------|-------------|
 | `GET` | `/admin/ai/usage` | Token usage & budget stats |
 | `GET` | `/admin/ai/logs` | Recent AI call logs |
-| `POST` | `/admin/retract` | One-click alert retraction |
-| `POST` | `/admin/approve` | Approve pending alerts |
+| `POST` | `/admin/alerts/retract` | One-click alert retraction |
+| `POST` | `/admin/alerts/approve` | Approve pending alerts |
 
 ---
 

@@ -23,6 +23,8 @@ _query_cache: Dict[str, dict] = {}
 _CACHE_TTL_SECONDS = 300  
 _MAX_CHAT_HISTORY = 2
 _FREE_CHAT_MIN_CHARS = int(os.getenv("FREE_CHAT_MIN_CHARS", "40"))
+_GOOGLE_CHAT_FIRST = os.getenv("GOOGLE_CHAT_FIRST", "true").strip().lower() in {"1", "true", "yes", "on"}
+_GOOGLE_CHAT_MODEL = os.getenv("GOOGLE_MODEL_CHAT", "gemini-2.0-flash")
 
 
 def _likely_needs_tools(message: str) -> bool:
@@ -329,12 +331,25 @@ class AIOrchestrator:
         # Limit history before first call
         messages = _limit_chat_history(messages)
 
+        primary_provider = "openai"
+        primary_model = agent.model
+        primary_client = ai_client.client
+
+        if (
+            _GOOGLE_CHAT_FIRST
+            and ai_client.google_client
+            and not context.get("force_primary_llm")
+        ):
+            primary_provider = "google"
+            primary_model = _GOOGLE_CHAT_MODEL
+            primary_client = ai_client.google_client
+
         try:
-            if not ai_client.client:
+            if not primary_client:
                 raise RuntimeError("Primary AI provider unavailable")
 
-            response = await ai_client.client.chat.completions.create(
-                model=agent.model,
+            response = await primary_client.chat.completions.create(
+                model=primary_model,
                 messages=messages,
                 tools=agent.tools,
                 tool_choice="auto" if agent.tools else None,
@@ -348,13 +363,67 @@ class AIOrchestrator:
             # Add assistant response to history
             messages.append(result_msg)
 
-            await ai_client._record_usage(
-                response.usage.total_tokens, agent.model, f"chat_{role}_init"
-            )
-            total_tokens = response.usage.total_tokens
+            usage = getattr(response, "usage", None)
+            total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+            if total_tokens > 0:
+                await ai_client._record_usage(
+                    total_tokens, primary_model, f"chat_{role}_init:{primary_provider}"
+                )
 
         except Exception as e:
-            logger.error(f"Agent initial error: {e}")
+            logger.error("Agent initial error (provider=%s, model=%s): %s", primary_provider, primary_model, e)
+
+            # Backup provider path (OpenAI)
+            if primary_provider != "openai" and ai_client.client:
+                try:
+                    openai_backup = await ai_client.chat(
+                        system_prompt=system_prompt,
+                        user_prompt=message,
+                        model=agent.model,
+                        max_tokens=min(agent.max_tokens, 700),
+                        temperature=agent.temperature,
+                    )
+                    if openai_backup and not openai_backup.get("error") and openai_backup.get("content"):
+                        openai_text = _sanitize_content(openai_backup["content"])
+                        return {
+                            "success": True,
+                            "message": openai_text,
+                            "role": role,
+                            "confidence": 0.62,
+                            "token_cost": int(((openai_backup.get("usage") or {}).get("total", 0) or 0)),
+                            "sources": [],
+                            "cached": False,
+                            "providers_used": ["openai"],
+                            "provider": "openai",
+                        }
+                except Exception as backup_exc:
+                    logger.error("OpenAI backup provider failed: %s", backup_exc)
+
+            # Backup provider path (Google Gemini)
+            if primary_provider != "google":
+                try:
+                    google_backup = await ai_client.chat_google(
+                        system_prompt=system_prompt,
+                        user_prompt=message,
+                        model=_GOOGLE_CHAT_MODEL,
+                        max_tokens=min(agent.max_tokens, 700),
+                        temperature=agent.temperature,
+                    )
+                    if google_backup and not google_backup.get("error") and google_backup.get("content"):
+                        google_text = _sanitize_content(google_backup["content"])
+                        return {
+                            "success": True,
+                            "message": google_text,
+                            "role": role,
+                            "confidence": 0.62,
+                            "token_cost": int(((google_backup.get("usage") or {}).get("total", 0) or 0)),
+                            "sources": [],
+                            "cached": False,
+                            "providers_used": ["google"],
+                            "provider": "google",
+                        }
+                except Exception as backup_exc:
+                    logger.error("Google backup provider failed: %s", backup_exc)
 
             # Backup provider path (Sarvam)
             try:
@@ -459,8 +528,8 @@ class AIOrchestrator:
 
             # Follow-up call
             try:
-                followup = await ai_client.client.chat.completions.create(
-                    model=agent.model,
+                followup = await primary_client.chat.completions.create(
+                    model=primary_model,
                     messages=messages,
                     tools=agent.tools,
                     tool_choice="auto", # Allow more tools
@@ -473,10 +542,13 @@ class AIOrchestrator:
                 
                 messages.append(result_msg)
                 
-                total_tokens += followup.usage.total_tokens
-                await ai_client._record_usage(
-                    followup.usage.total_tokens, agent.model, f"chat_loop_{loop_count}"
-                )
+                usage = getattr(followup, "usage", None)
+                loop_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+                total_tokens += loop_tokens
+                if loop_tokens > 0:
+                    await ai_client._record_usage(
+                        loop_tokens, primary_model, f"chat_loop_{loop_count}:{primary_provider}"
+                    )
             except Exception as e:
                 logger.error(f"Loop error: {e}")
                 final_content = "I encountered an error processing the tool results."
@@ -516,7 +588,7 @@ class AIOrchestrator:
             "role": role,
             "tool_calls_executed": params["tool_calls_executed"],
             "usage": {
-                "model": agent.model,
+                "model": primary_model,
                 "prompt": 0,
                 "completion": 0,
                 "total": total_tokens,
@@ -526,7 +598,8 @@ class AIOrchestrator:
             "token_cost": total_tokens,
             "sources": params["sources"][:5],
             "cached": cached,
-            "providers_used": ["openai"],
+            "providers_used": [primary_provider],
+            "provider": primary_provider,
         }
         
         if params["quiz_data"]:

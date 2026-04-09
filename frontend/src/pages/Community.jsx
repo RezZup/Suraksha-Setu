@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation as useRouterLocation } from 'react-router-dom';
 import { 
   Plus, Search, TrendingUp, 
   Award, Heart, Users, MapPin, 
@@ -29,6 +30,7 @@ import axios from 'axios';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLocation as useAppLocation } from '@/contexts/LocationContext';
+import { getAuthHeadersForApi } from '@/utils/authHeaders';
 
 const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api';
 
@@ -43,13 +45,18 @@ const BADGE_CONFIG = {
 };
 
 const Community = () => {
+  const routerLocation = useRouterLocation();
   const { user } = useAuth();
   const { gpsPincode, homePincode } = useAppLocation();
+  const getAuthHeaders = () => getAuthHeadersForApi(API_URL, 'citizen');
 
   // Effective pincode: prefer home, fall back to GPS
   const effectivePincode = homePincode || gpsPincode;
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [showDMPanel, setShowDMPanel] = useState(false);
+  const [dmInitialPartner, setDmInitialPartner] = useState(null);
+  const [dmInitialPostId, setDmInitialPostId] = useState(null);
+  const [dmInitialPostSnippet, setDmInitialPostSnippet] = useState(null);
   const [posts, setPosts] = useState([]);
   const [filteredPosts, setFilteredPosts] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -58,6 +65,30 @@ const Community = () => {
   const [sortBy, setSortBy] = useState('recent');
   const [activeTab, setActiveTab] = useState('feed');
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const params = new URLSearchParams(routerLocation.search || '');
+    if (params.get('dm') !== '1') return;
+
+    const partnerId = params.get('partner_id');
+    if (!partnerId) return;
+
+    setDmInitialPartner({
+      id: partnerId,
+      name: params.get('partner_name') || 'Community Member',
+      photo: params.get('partner_photo') || null,
+    });
+    setDmInitialPostId(params.get('post_id') || null);
+    setDmInitialPostSnippet(params.get('post_snippet') || null);
+    setShowDMPanel(true);
+  }, [routerLocation.search]);
+
+  const handleCloseDMPanel = () => {
+    setShowDMPanel(false);
+    setDmInitialPartner(null);
+    setDmInitialPostId(null);
+    setDmInitialPostSnippet(null);
+  };
 
   // Auto-seed pincode filter from user's location context on first load
   useEffect(() => {
@@ -94,7 +125,10 @@ const Community = () => {
       const params = { limit: 50 };
       if (filterType !== 'all') params.type = filterType;
       if (pin) params.pincode = pin;
-      const response = await axios.get(`${API_URL}/community/posts`, { params });
+      const response = await axios.get(`${API_URL}/community/posts`, {
+        params,
+        headers: getAuthHeaders(),
+      });
       setPosts(response.data.posts || []);
       setFilteredPosts(response.data.posts || []);
     } catch (error) {
@@ -216,10 +250,17 @@ const Community = () => {
         ...newPost,
         pincode: newPost.pincode || effectivePincode || undefined,
       };
-      const response = await axios.post(`${API_URL}/community/posts`, postWithPincode);
+      const response = await axios.post(`${API_URL}/community/posts`, postWithPincode, {
+        headers: getAuthHeaders(),
+      });
+
       if (response.data.success && response.data.post) {
         setPosts((prev) => [response.data.post, ...prev]);
-        toast.success('Post published!');
+        if (response.data.post.verification_requires_admin_review) {
+          toast.success('Post submitted for admin verification. You can track progress in your post card.');
+        } else {
+          toast.success('Post published!');
+        }
       }
     } catch (error) {
       console.error('Error creating post:', error);
@@ -269,7 +310,9 @@ const Community = () => {
   const handlePostDelete = async (postId) => {
     if (window.confirm('Are you sure you want to delete this post?')) {
       try {
-        const response = await axios.delete(`${API_URL}/community/posts/${postId}`);
+        const response = await axios.delete(`${API_URL}/community/posts/${postId}`, {
+          headers: getAuthHeaders(),
+        });
         if (response.data.success) {
           setPosts(posts.filter(post => post.id !== postId));
         }
@@ -819,10 +862,13 @@ const Community = () => {
       {/* DM Inbox Panel */}
       <DirectMessagePanel
         isOpen={showDMPanel}
-        onClose={() => setShowDMPanel(false)}
-        myUserId={user?.id}
-        myName={user?.displayName || user?.email}
+        onClose={handleCloseDMPanel}
+        myUserId={user?.id || user?.uid}
+        myName={user?.name || user?.displayName || user?.email}
         myPhoto={user?.photoURL}
+        initialPartner={dmInitialPartner}
+        initialPostId={dmInitialPostId}
+        initialPostSnippet={dmInitialPostSnippet}
       />
     </div>
   );

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { 
   AlertTriangle, 
@@ -18,11 +18,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { useToast } from '@/hooks/use-toast';
 import { cachedFetchJson } from '@/utils/requestCache';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTranslation } from 'react-i18next';
-import { useLocation as useRouterLocation } from 'react-router-dom';
+import { useLocation as useRouterLocation, useNavigate } from 'react-router-dom';
+import { getAuthHeadersForApi } from '@/utils/authHeaders';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
@@ -133,6 +135,7 @@ const Alerts = () => {
   const { user } = useAuth();
   const { t } = useTranslation();
   const routerLocation = useRouterLocation();
+  const navigate = useNavigate();
   const [alerts, setAlerts] = useState([]);
   const [filteredAlerts, setFilteredAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -146,8 +149,20 @@ const Alerts = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortMode, setSortMode] = useState('latest');
   const [feedMode, setFeedMode] = useState('all');
+  const [showCreateAlert, setShowCreateAlert] = useState(false);
+  const [creatingAlert, setCreatingAlert] = useState(false);
+  const [createAlertForm, setCreateAlertForm] = useState({
+    title: '',
+    alert_type: 'weather',
+    severity: 'warning',
+    city: '',
+    lat: '',
+    lon: '',
+    description: '',
+  });
   
   const { toast } = useToast();
+  const isPrivilegedUser = ['admin', 'developer'].includes(String(user?.role || '').toLowerCase());
 
   const submitFeedback = async (alertId, verdict) => {
     try {
@@ -192,67 +207,133 @@ const Alerts = () => {
     }
   };
 
-  // Fetch alerts data
-  useEffect(() => {
-    const fetchAlerts = async () => {
-      try {
-        setLoading(true);
-        const params = new URLSearchParams();
-        
-        // Apply filters to API request
-        if (selectedSeverity !== 'all') {
-          params.append('severity', selectedSeverity);
-        }
-        if (selectedType !== 'all') {
-          params.append('report_type', selectedType);
-        }
-        
-        const data = await cachedFetchJson(
-          `${API_URL}/api/alerts${params.toString() ? '?' + params.toString() : ''}`,
-          { ttlMs: 45 * 1000 }
-        );
-        
-        // Format data for display
-        const formattedAlerts = (data.alerts || []).map(alert => ({
-          id: alert.id || Math.random(),
-          type: (alert.report_type || alert.type || alert.alert_type || 'info').toLowerCase(),
-          severity: alert.severity?.toLowerCase() || 'info',
-          title: alert.title || alert.alert_type || 'Alert',
-          message: alert.description || alert.message || '',
-          location: typeof alert.location === 'string'
-            ? alert.location
-            : alert.location_data?.city || alert.location_data?.name || alert.location_data?.state || 'Unknown Location',
-          time: (alert.timestamp || alert.created_at)
-            ? new Date(alert.timestamp || alert.created_at).toLocaleString()
-            : t('alerts.recently'),
-          sortTimestamp: alert.timestamp || alert.created_at || new Date().toISOString(),
-          impact: alert.affected_population ? `Affecting ${alert.affected_population} people` : 'To be determined',
-          trustScore: typeof alert.trust_score === 'number'
-            ? alert.trust_score
-            : (typeof alert.feedback?.trust_score === 'number' ? alert.feedback.trust_score : null),
-          feedbackCounts: alert.feedback?.counts || null,
-          feedbackTotal: alert.feedback?.total || 0,
-        }));
-        
-        setAlerts(formattedAlerts);
-        setFilteredAlerts(formattedAlerts);
-        setError(null);
-      } catch (err) {
-        console.error('Error fetching alerts:', err);
-        setError('Failed to load alerts. Showing sample data.');
-        setAlerts([]);
-        setFilteredAlerts([]);
-      } finally {
-        setLoading(false);
+  const fetchAlerts = useCallback(async () => {
+    try {
+      setLoading(true);
+      const params = new URLSearchParams();
+
+      if (selectedSeverity !== 'all') {
+        params.append('severity', selectedSeverity);
       }
+      if (selectedType !== 'all') {
+        params.append('report_type', selectedType);
+      }
+
+      const data = await cachedFetchJson(
+        `${API_URL}/api/alerts${params.toString() ? '?' + params.toString() : ''}`,
+        { ttlMs: 45 * 1000 }
+      );
+
+      const formattedAlerts = (data.alerts || []).map(alert => ({
+        id: alert.id || Math.random(),
+        type: (alert.report_type || alert.type || alert.alert_type || 'info').toLowerCase(),
+        severity: alert.severity?.toLowerCase() || 'info',
+        title: alert.title || alert.alert_type || 'Alert',
+        message: alert.description || alert.message || '',
+        location: typeof alert.location === 'string'
+          ? alert.location
+          : alert.location_data?.city || alert.location_data?.name || alert.location_data?.state || 'Unknown Location',
+        time: (alert.timestamp || alert.created_at)
+          ? new Date(alert.timestamp || alert.created_at).toLocaleString()
+          : t('alerts.recently'),
+        sortTimestamp: alert.timestamp || alert.created_at || new Date().toISOString(),
+        impact: alert.affected_population ? `Affecting ${alert.affected_population} people` : 'To be determined',
+        trustScore: typeof alert.trust_score === 'number'
+          ? alert.trust_score
+          : (typeof alert.feedback?.trust_score === 'number' ? alert.feedback.trust_score : null),
+        feedbackCounts: alert.feedback?.counts || null,
+        feedbackTotal: alert.feedback?.total || 0,
+      }));
+
+      setAlerts(formattedAlerts);
+      setFilteredAlerts(formattedAlerts);
+      setError(null);
+    } catch (err) {
+      console.error('Error fetching alerts:', err);
+      setError('Failed to load alerts. Showing sample data.');
+      setAlerts([]);
+      setFilteredAlerts([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedSeverity, selectedType, t]);
+
+  const handleCreateSystemAlert = async () => {
+    if (!isPrivilegedUser) return;
+
+    const title = createAlertForm.title.trim();
+    const description = createAlertForm.description.trim();
+    if (!title || !description) {
+      toast({
+        title: 'Missing fields',
+        description: 'Title and description are required to send an alert.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const payload = {
+      alert_type: createAlertForm.alert_type,
+      severity: createAlertForm.severity,
+      title,
+      description,
+      source: 'admin',
+      is_active: true,
+      location: {
+        city: createAlertForm.city || 'Unknown',
+        lat: createAlertForm.lat !== '' ? Number(createAlertForm.lat) : null,
+        lon: createAlertForm.lon !== '' ? Number(createAlertForm.lon) : null,
+      },
     };
 
+    setCreatingAlert(true);
+    try {
+      const res = await fetch(`${API_URL}/admin/alerts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeadersForApi(API_URL, 'admin'),
+        },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.detail || data?.error || 'Failed to create alert');
+      }
+
+      toast({
+        title: 'Alert sent',
+        description: 'System alert has been created and published.',
+      });
+      setCreateAlertForm({
+        title: '',
+        alert_type: 'weather',
+        severity: 'warning',
+        city: '',
+        lat: '',
+        lon: '',
+        description: '',
+      });
+      await fetchAlerts();
+    } catch (err) {
+      toast({
+        title: 'Failed to send alert',
+        description: err?.message || 'Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setCreatingAlert(false);
+    }
+  };
+
+  // Fetch alerts data
+  useEffect(() => {
     fetchAlerts();
     
     // Refresh alerts every 2 minutes
     const interval = setInterval(fetchAlerts, 2 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [selectedSeverity, selectedType]);
+  }, [fetchAlerts]);
 
   // Apply client-side region filter
   useEffect(() => {
@@ -341,11 +422,94 @@ const Alerts = () => {
           >
             <Filter className="w-4 h-4" /> {t('alerts.filters')}
           </Button>
-          <Button variant="destructive" className="gap-2">
-            <AlertTriangle className="w-4 h-4" /> {t('alerts.report')}
+          <Button
+            variant="destructive"
+            className="gap-2"
+            onClick={() => {
+              if (isPrivilegedUser) {
+                setShowCreateAlert(v => !v);
+              } else {
+                navigate('/app/community');
+              }
+            }}
+          >
+            <AlertTriangle className="w-4 h-4" /> {isPrivilegedUser ? 'Send Alert' : t('alerts.report')}
           </Button>
         </div>
       </div>
+
+      {isPrivilegedUser && showCreateAlert && (
+        <Card className="border-destructive/30 bg-destructive/5">
+          <CardHeader>
+            <CardTitle className="text-lg">Create and Send Alert</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Input
+                value={createAlertForm.title}
+                onChange={(e) => setCreateAlertForm((prev) => ({ ...prev, title: e.target.value }))}
+                placeholder="Alert title"
+              />
+              <Input
+                value={createAlertForm.city}
+                onChange={(e) => setCreateAlertForm((prev) => ({ ...prev, city: e.target.value }))}
+                placeholder="City / area"
+              />
+              <select
+                value={createAlertForm.alert_type}
+                onChange={(e) => setCreateAlertForm((prev) => ({ ...prev, alert_type: e.target.value }))}
+                className="w-full px-3 py-2 border rounded-md bg-background text-foreground text-sm"
+              >
+                <option value="weather">Weather</option>
+                <option value="flood">Flood</option>
+                <option value="cyclone">Cyclone</option>
+                <option value="earthquake">Earthquake</option>
+                <option value="heatwave">Heatwave</option>
+                <option value="wildfire">Wildfire</option>
+              </select>
+              <select
+                value={createAlertForm.severity}
+                onChange={(e) => setCreateAlertForm((prev) => ({ ...prev, severity: e.target.value }))}
+                className="w-full px-3 py-2 border rounded-md bg-background text-foreground text-sm"
+              >
+                <option value="warning">Warning</option>
+                <option value="high">High</option>
+                <option value="critical">Critical</option>
+              </select>
+              <Input
+                type="number"
+                step="any"
+                value={createAlertForm.lat}
+                onChange={(e) => setCreateAlertForm((prev) => ({ ...prev, lat: e.target.value }))}
+                placeholder="Latitude (optional)"
+              />
+              <Input
+                type="number"
+                step="any"
+                value={createAlertForm.lon}
+                onChange={(e) => setCreateAlertForm((prev) => ({ ...prev, lon: e.target.value }))}
+                placeholder="Longitude (optional)"
+              />
+            </div>
+
+            <Textarea
+              value={createAlertForm.description}
+              onChange={(e) => setCreateAlertForm((prev) => ({ ...prev, description: e.target.value }))}
+              placeholder="Describe the alert, impact, and immediate safety actions"
+              className="min-h-[100px]"
+            />
+
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowCreateAlert(false)} disabled={creatingAlert}>
+                Cancel
+              </Button>
+              <Button onClick={handleCreateSystemAlert} disabled={creatingAlert}>
+                {creatingAlert ? 'Sending...' : 'Send Alert'}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Card className="border-destructive/30 bg-destructive/5">

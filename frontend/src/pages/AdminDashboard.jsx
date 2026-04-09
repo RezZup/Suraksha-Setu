@@ -59,6 +59,13 @@ const AdminDashboard = () => {
   const [systemLogs, setSystemLogs] = useState([]);
   const [reports, setReports] = useState([]);
   const [reportFilter, setReportFilter] = useState('pending');
+  const [verificationPosts, setVerificationPosts] = useState([]);
+  const [verificationFilter, setVerificationFilter] = useState('pending_admin_review');
+  const [verificationNotes, setVerificationNotes] = useState({});
+  const [verificationReports, setVerificationReports] = useState({});
+  const [verificationNotifyChannels, setVerificationNotifyChannels] = useState({});
+  const [verificationNotifyRadiusKm, setVerificationNotifyRadiusKm] = useState({});
+  const [verificationUpdatingId, setVerificationUpdatingId] = useState(null);
   const [alertForm, setAlertForm] = useState({
     title: '',
     alert_type: 'weather',
@@ -106,7 +113,7 @@ const AdminDashboard = () => {
     try {
       const authHeaders = getAuthHeaders();
       const authFetch = { fetchOptions: { headers: authHeaders } };
-      const [alertsRes, pendingRes, safetyRes, smsRes, incidentRes, smsLogRes, statsRes, logsRes, tgRes, bcRes] = await Promise.allSettled([
+      const [alertsRes, pendingRes, safetyRes, smsRes, incidentRes, smsLogRes, statsRes, logsRes, tgRes, bcRes, verificationRes] = await Promise.allSettled([
         cachedFetchJson(`${API_URL}/admin/alerts`, { ttlMs: 30 * 1000, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/alerts/pending`, { ttlMs: 30 * 1000, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/safety/status`, { ttlMs: 30 * 1000, ...authFetch }),
@@ -117,6 +124,7 @@ const AdminDashboard = () => {
         cachedFetchJson(`${API_URL}/admin/logs?limit=10`, { ttlMs: 30 * 1000, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/telegram/stats`, { ttlMs: 30 * 1000, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/broadcast/channels`, { ttlMs: 30 * 1000, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/community-verification/posts?status=all&limit=100`, { ttlMs: 30 * 1000, ...authFetch }),
       ]);
       if (alertsRes.status === 'fulfilled') setAlerts(alertsRes.value?.alerts || alertsRes.value || []);
       if (pendingRes.status === 'fulfilled') setPendingAlerts(pendingRes.value?.pending_alerts || []);
@@ -128,6 +136,7 @@ const AdminDashboard = () => {
       if (logsRes.status === 'fulfilled') setSystemLogs(logsRes.value?.logs || []);
       if (tgRes.status === 'fulfilled') setTelegramStats(tgRes.value);
       if (bcRes.status === 'fulfilled') setBroadcastChannelStats(bcRes.value);
+      if (verificationRes.status === 'fulfilled') setVerificationPosts(verificationRes.value?.posts || []);
       setLastUpdated(new Date());
     } catch (err) {
       console.error('Admin fetch error:', err);
@@ -159,6 +168,64 @@ const AdminDashboard = () => {
     const interval = setInterval(() => { fetchData(); if (activeTab === 'reports') fetchReports(); }, 30000);
     return () => clearInterval(interval);
   }, [fetchData, fetchReports, activeTab]);
+
+  const filteredVerificationPosts = verificationFilter === 'all'
+    ? verificationPosts
+    : verificationPosts.filter((post) => (post?.verification?.status || 'pending_admin_review') === verificationFilter);
+
+  const getMediaPreviewUrl = (mediaItem) => {
+    if (!mediaItem || !mediaItem.url) return '';
+    return mediaItem.url.startsWith('http') ? mediaItem.url : `${API_URL}${mediaItem.url}`;
+  };
+
+  const handleVerificationAction = async (postId, status) => {
+    const adminComment = (verificationNotes[postId] || '').trim();
+    const reportToUser = (verificationReports[postId] || '').trim();
+    const notifyConfig = verificationNotifyChannels[postId] || { sms: false, telegram: true };
+    const notifyChannels = Object.entries(notifyConfig)
+      .filter(([, enabled]) => Boolean(enabled))
+      .map(([channel]) => channel);
+    const rawRadius = verificationNotifyRadiusKm[postId];
+    const parsedRadius = Number(rawRadius);
+    const notifyRadiusKm = Number.isFinite(parsedRadius) && parsedRadius > 0
+      ? Math.min(50, Math.max(1, parsedRadius))
+      : 10;
+
+    setVerificationUpdatingId(postId);
+    try {
+      const res = await fetch(`${API_URL}/admin/community-verification/posts/${postId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          status,
+          admin_comment: adminComment || undefined,
+          report_to_user: reportToUser || undefined,
+          notify_channels: status === 'approved' ? notifyChannels : undefined,
+          notify_radius_km: status === 'approved' ? notifyRadiusKm : undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data?.detail || data?.error || 'Verification update failed');
+      }
+
+      const delivery = data?.delivery;
+      if (status === 'approved' && delivery) {
+        const smsStats = delivery?.sms || {};
+        const tgStats = delivery?.telegram || {};
+        const smsText = smsStats?.requested ? `SMS ${smsStats?.sent || 0}/${smsStats?.total || 0}` : 'SMS skipped';
+        const tgText = tgStats?.requested ? `Telegram ${tgStats?.sent || 0}/${tgStats?.total || 0}` : 'Telegram skipped';
+        setActionFeedback(`Community post approved and published. ${smsText} | ${tgText}`);
+      } else {
+        setActionFeedback(`Community post updated: ${data?.verification?.status_label || status}`);
+      }
+      await fetchData();
+    } catch (err) {
+      setActionFeedback(`Error: ${err.message}`);
+    } finally {
+      setVerificationUpdatingId(null);
+    }
+  };
 
   const handleReportAction = async (reportId, status) => {
     try {
@@ -332,35 +399,44 @@ const AdminDashboard = () => {
     setBroadcastFeedback('');
 
     try {
-      const genPrompt = [
-        'Create a clear public safety broadcast message.',
-        `Severity: ${broadcastSeverity}`,
-        'Output must be concise, practical, and avoid panic.',
-        'Include one immediate action and one helpline hint.',
-        `Context: ${prompt}`,
-      ].join('\n');
-
-      const res = await fetch(`${API_URL}/api/ai/chat`, {
+      const res = await fetch(`${API_URL}/admin/broadcast/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
-          role: 'citizen',
-          message: genPrompt,
-          context: { domain: 'admin_broadcast', style: 'short_public_alert' },
+          prompt,
+          severity: broadcastSeverity,
+          audience: 'citizens in affected area',
+          language: 'English',
         }),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data?.detail || 'AI generation failed');
 
-      const generated = (data?.response || '').trim();
-      if (!generated) throw new Error('AI returned an empty message');
+      const generated = data?.generated || {};
+      const generatedTitle = (generated?.title || '').trim();
+      const generatedMessage = (generated?.message || '').trim();
+      const generatedActions = Array.isArray(generated?.key_actions) ? generated.key_actions : [];
+      const generatedAdminNotes = (generated?.admin_notes || '').trim();
 
-      setBroadcastMessage(generated);
-      if (!broadcastTitle.trim()) {
-        setBroadcastTitle(`Admin ${broadcastSeverity === 'critical' ? 'Emergency' : 'Update'}`);
+      if (!generatedMessage) throw new Error('AI returned an empty message');
+
+      const messageParts = [generatedMessage];
+      if (generatedActions.length > 0) {
+        messageParts.push('');
+        messageParts.push('Immediate actions:');
+        generatedActions.slice(0, 5).forEach((action, index) => {
+          messageParts.push(`${index + 1}. ${action}`);
+        });
       }
-      setBroadcastFeedback('✅ Message generated. Review and send when ready.');
+      if (generatedAdminNotes) {
+        messageParts.push('');
+        messageParts.push(`Admin note: ${generatedAdminNotes}`);
+      }
+
+      setBroadcastTitle(generatedTitle || `Admin ${broadcastSeverity === 'critical' ? 'Emergency' : 'Update'}`);
+      setBroadcastMessage(messageParts.join('\n'));
+      setBroadcastFeedback(`✅ Detailed message generated with ${data?.provider || 'OpenRouter'} (${data?.model || 'gpt-4o-mini'}). Review and send when ready.`);
     } catch (err) {
       setBroadcastFeedback(`❌ ${err.message}`);
     } finally {
@@ -475,6 +551,15 @@ const AdminDashboard = () => {
           <TabsTrigger value="broadcast" className="gap-2">
             <Radio className="w-4 h-4" />
             Broadcast
+          </TabsTrigger>
+          <TabsTrigger value="verification" className="gap-2">
+            <ShieldCheck className="w-4 h-4" />
+            Community Verify
+            {(stats?.pending_post_verifications || 0) > 0 && (
+              <span className="ml-1 bg-destructive text-destructive-foreground text-xs rounded-full px-1.5 py-0.5 font-bold">
+                {stats.pending_post_verifications}
+              </span>
+            )}
           </TabsTrigger>
           <TabsTrigger value="reports" className="gap-2">
             <FileWarning className="w-4 h-4" />
@@ -669,6 +754,261 @@ const AdminDashboard = () => {
           </CardContent>
         </Card>
       </div>
+        </TabsContent>
+
+        {/* ═══════ COMMUNITY VERIFICATION TAB ═══════ */}
+        <TabsContent value="verification" className="space-y-6">
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div>
+              <h2 className="text-xl font-semibold">Community Alert Verification</h2>
+              <p className="text-sm text-muted-foreground">
+                Review community alert and emergency posts before making them public.
+              </p>
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              {[
+                ['pending_admin_review', 'Pending'],
+                ['in_review', 'In Review'],
+                ['needs_info', 'Need Info'],
+                ['approved', 'Approved'],
+                ['rejected', 'Rejected'],
+                ['all', 'All'],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  onClick={() => setVerificationFilter(value)}
+                  className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${verificationFilter === value ? 'bg-primary text-primary-foreground' : 'border hover:bg-muted'}`}
+                >
+                  {label}
+                </button>
+              ))}
+              <Button size="sm" variant="outline" onClick={fetchData} className="gap-1">
+                <RefreshCw className="w-3.5 h-3.5" /> Refresh
+              </Button>
+            </div>
+          </div>
+
+          {actionFeedback && (
+            <Alert className="border-blue-200 bg-blue-50">
+              <AlertDescription className="text-blue-800">{actionFeedback}</AlertDescription>
+            </Alert>
+          )}
+
+          {filteredVerificationPosts.length === 0 ? (
+            <Card>
+              <CardContent className="py-10 text-center text-muted-foreground">
+                No community posts found for this verification state.
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-4">
+              {filteredVerificationPosts.map((post) => {
+                const verification = post?.verification || {};
+                const status = verification?.status || 'pending_admin_review';
+                const statusLabel = verification?.status_label || status;
+                const progress = Math.max(0, Math.min(100, Number(verification?.progress_percent || 0)));
+                const statusBadgeClass = {
+                  pending_admin_review: 'bg-amber-100 text-amber-700 border-amber-300',
+                  in_review: 'bg-blue-100 text-blue-700 border-blue-300',
+                  needs_info: 'bg-orange-100 text-orange-700 border-orange-300',
+                  approved: 'bg-emerald-100 text-emerald-700 border-emerald-300',
+                  rejected: 'bg-rose-100 text-rose-700 border-rose-300',
+                }[status] || 'bg-slate-100 text-slate-700 border-slate-300';
+
+                const imageMedia = (post?.media || []).find((item) => String(item?.type || '').startsWith('image/'));
+                const imageUrl = getMediaPreviewUrl(imageMedia);
+                const imageAnalysis = post?.image_analysis || {};
+                const locationLabel = post?.location?.name || post?.location?.city || post?.location?.pincode || 'Unknown location';
+
+                const noteValue = verificationNotes[post.id] ?? verification?.admin_comment ?? '';
+                const reportValue = verificationReports[post.id] ?? verification?.report_to_user ?? '';
+                const notifyChannels = verificationNotifyChannels[post.id] || { sms: false, telegram: true };
+                const notifyRadius = verificationNotifyRadiusKm[post.id] ?? 10;
+
+                return (
+                  <Card key={post.id}>
+                    <CardContent className="p-4 space-y-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-semibold text-sm">{post?.location?.author || 'Community Member'}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {String(post?.type || '').toUpperCase()} • {locationLabel} • {post?.created_at ? new Date(post.created_at).toLocaleString() : ''}
+                          </p>
+                        </div>
+                        <Badge className={`border ${statusBadgeClass}`}>
+                          {statusLabel}
+                        </Badge>
+                      </div>
+
+                      <p className="text-sm whitespace-pre-wrap">{post?.content || ''}</p>
+
+                      {imageUrl && (
+                        <div className="space-y-2">
+                          <img
+                            src={imageUrl}
+                            alt="Community evidence"
+                            className="w-full max-h-80 object-cover rounded-md border"
+                          />
+                          <p className="text-xs text-muted-foreground">Evidence image submitted by user.</p>
+                        </div>
+                      )}
+
+                      {imageAnalysis?.disaster_type && (
+                        <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+                          <p>
+                            AI analysis: <strong className="text-foreground capitalize">{imageAnalysis.disaster_type}</strong>
+                            {' '}• severity <strong className="text-foreground capitalize">{imageAnalysis.severity || 'unknown'}</strong>
+                            {' '}• confidence {Math.round((Number(imageAnalysis.confidence || 0) || 0) * 100)}%
+                          </p>
+                          <p className="mt-1">Authenticity: {imageAnalysis.authenticity || 'uncertain'}</p>
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-medium">Verification Progress</span>
+                          <span>{progress}%</span>
+                        </div>
+                        <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+                          <div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} />
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {verification?.message || 'Waiting for admin action.'}
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-xs font-medium mb-1 block">Admin comment (visible update)</label>
+                          <textarea
+                            className="w-full min-h-[84px] border rounded-md p-2 text-sm bg-background"
+                            placeholder="Add context for user/community..."
+                            value={noteValue}
+                            onChange={(e) => setVerificationNotes((prev) => ({ ...prev, [post.id]: e.target.value }))}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium mb-1 block">Report to user (decision reason)</label>
+                          <textarea
+                            className="w-full min-h-[84px] border rounded-md p-2 text-sm bg-background"
+                            placeholder="Explain why approved/rejected/needs info..."
+                            value={reportValue}
+                            onChange={(e) => setVerificationReports((prev) => ({ ...prev, [post.id]: e.target.value }))}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="rounded-md border bg-muted/20 p-3">
+                        <p className="text-xs font-medium">Nearby notifications on approval</p>
+                        <p className="text-[11px] text-muted-foreground mt-1">
+                          Choose delivery channels and radius used when you click Approve & Publish.
+                        </p>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-2">
+                          <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4"
+                              checked={Boolean(notifyChannels.sms)}
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                setVerificationNotifyChannels((prev) => ({
+                                  ...prev,
+                                  [post.id]: {
+                                    ...(prev[post.id] || { sms: false, telegram: true }),
+                                    sms: checked,
+                                  },
+                                }));
+                              }}
+                            />
+                            SMS
+                          </label>
+                          <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4"
+                              checked={Boolean(notifyChannels.telegram)}
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                setVerificationNotifyChannels((prev) => ({
+                                  ...prev,
+                                  [post.id]: {
+                                    ...(prev[post.id] || { sms: false, telegram: true }),
+                                    telegram: checked,
+                                  },
+                                }));
+                              }}
+                            />
+                            Telegram
+                          </label>
+                          <div className="flex items-center gap-2 text-sm">
+                            <span>Radius</span>
+                            <Input
+                              type="number"
+                              min={1}
+                              max={50}
+                              step={1}
+                              value={notifyRadius}
+                              onChange={(e) => {
+                                const raw = e.target.value;
+                                if (raw === '') {
+                                  setVerificationNotifyRadiusKm((prev) => ({ ...prev, [post.id]: '' }));
+                                  return;
+                                }
+                                const next = Number(raw);
+                                setVerificationNotifyRadiusKm((prev) => ({
+                                  ...prev,
+                                  [post.id]: Number.isFinite(next) ? Math.min(50, Math.max(1, next)) : 10,
+                                }));
+                              }}
+                              className="h-8 w-24"
+                            />
+                            <span className="text-xs text-muted-foreground">km</span>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground mt-2">
+                          In-app real-time delivery is also attempted for the same nearby radius.
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={verificationUpdatingId === post.id}
+                          onClick={() => handleVerificationAction(post.id, 'in_review')}
+                        >
+                          Mark In Review
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={verificationUpdatingId === post.id}
+                          onClick={() => handleVerificationAction(post.id, 'needs_info')}
+                        >
+                          Request More Info
+                        </Button>
+                        <Button
+                          size="sm"
+                          disabled={verificationUpdatingId === post.id}
+                          onClick={() => handleVerificationAction(post.id, 'approved')}
+                        >
+                          {verificationUpdatingId === post.id ? 'Updating...' : 'Approve & Publish'}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          disabled={verificationUpdatingId === post.id}
+                          onClick={() => handleVerificationAction(post.id, 'rejected')}
+                        >
+                          Reject
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
         </TabsContent>
 
         {/* ═══════ COMMUNITY REPORTS TAB ═══════ */}

@@ -42,6 +42,71 @@ ALLOWED_VIDEO_TYPES = {"video/mp4", "video/webm"}
 ALLOWED_TYPES = ALLOWED_IMAGE_TYPES | ALLOWED_VIDEO_TYPES
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 
+REVIEW_REQUIRED_POST_TYPES = {"alert", "warning", "emergency"}
+VERIFICATION_STATUS_META = {
+    "pending_admin_review": {"label": "Pending Admin Review", "progress": 25},
+    "in_review": {"label": "Under Review", "progress": 55},
+    "needs_info": {"label": "Need More Information", "progress": 40},
+    "approved": {"label": "Verified by Admin", "progress": 100},
+    "rejected": {"label": "Rejected", "progress": 100},
+    "not_required": {"label": "No Verification Needed", "progress": 100},
+}
+
+
+def _default_verification_state(post_type: str) -> dict:
+    normalized_type = (post_type or "general").strip().lower()
+    if normalized_type in REVIEW_REQUIRED_POST_TYPES:
+        meta = VERIFICATION_STATUS_META["pending_admin_review"]
+        return {
+            "requires_admin_review": True,
+            "status": "pending_admin_review",
+            "status_label": meta["label"],
+            "progress_percent": meta["progress"],
+            "message": "Submitted and waiting for admin verification.",
+            "admin_comment": None,
+            "report_to_user": None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "history": [],
+        }
+
+    meta = VERIFICATION_STATUS_META["not_required"]
+    return {
+        "requires_admin_review": False,
+        "status": "not_required",
+        "status_label": meta["label"],
+        "progress_percent": meta["progress"],
+        "message": "This post is visible without admin verification.",
+        "admin_comment": None,
+        "report_to_user": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "history": [],
+    }
+
+
+def _normalize_verification_state(location_meta: dict, post_type: str) -> dict:
+    defaults = _default_verification_state(post_type)
+    raw = location_meta.get("verification") if isinstance(location_meta, dict) else None
+    if not isinstance(raw, dict):
+        return defaults
+
+    merged = {**defaults, **raw}
+    if not isinstance(merged.get("history"), list):
+        merged["history"] = []
+    status = str(merged.get("status") or defaults["status"]).strip().lower()
+    if status not in VERIFICATION_STATUS_META:
+        status = defaults["status"]
+    status_meta = VERIFICATION_STATUS_META[status]
+    merged["status"] = status
+    merged["status_label"] = merged.get("status_label") or status_meta["label"]
+    try:
+        merged["progress_percent"] = int(merged.get("progress_percent", status_meta["progress"]))
+    except Exception:
+        merged["progress_percent"] = status_meta["progress"]
+
+    merged["progress_percent"] = max(0, min(100, merged["progress_percent"]))
+    merged["requires_admin_review"] = bool(merged.get("requires_admin_review", defaults["requires_admin_review"]))
+    return merged
+
 
 class CreatePostRequest(BaseModel):
     content: str
@@ -69,27 +134,36 @@ class CreateCommentRequest(BaseModel):
 
 def _post_to_dict(p: CommunityPost, comments: list = None) -> dict:
     """Convert a CommunityPost ORM object to API response dict."""
+    location_meta = p.location if isinstance(p.location, dict) else {}
+    verification = _normalize_verification_state(location_meta, p.post_type)
     return {
         "id": p.id,
         "user_id": p.user_id or "anonymous",
         "content": p.content,
         "title": p.content[:80] if p.content else "",
         "type": p.post_type or "general",
-        "author": (p.location or {}).get("author", "Community Member"),
-        "author_photo": (p.location or {}).get("author_photo"),
-        "location": (p.location or {}).get("name", "India"),
-        "lat": (p.location or {}).get("lat"),
-        "lon": (p.location or {}).get("lon"),
-        "pincode": (p.location or {}).get("pincode"),
+        "author": location_meta.get("author", "Community Member"),
+        "author_photo": location_meta.get("author_photo"),
+        "location": location_meta.get("name", "India"),
+        "lat": location_meta.get("lat"),
+        "lon": location_meta.get("lon"),
+        "pincode": location_meta.get("pincode"),
         "tags": p.tags or [],
         "media": p.media or [],
-        "image_analysis": (p.location or {}).get("image_analysis"),
+        "image_analysis": location_meta.get("image_analysis"),
         "likes": p.likes,
         "shares": p.shares,
         "comments": comments or [],
         "comments_count": p.comments_count or len(comments or []),
         "likedByUser": False,
         "savedByUser": False,
+        "verification": verification,
+        "verification_status": verification.get("status"),
+        "verification_progress": verification.get("progress_percent"),
+        "verification_requires_admin_review": verification.get("requires_admin_review"),
+        "admin_comment": verification.get("admin_comment"),
+        "admin_report": verification.get("report_to_user"),
+        "is_public": bool(p.is_public),
         "is_resolved": getattr(p, 'is_resolved', False) or False,
         "resolved_at": (p.resolved_at.isoformat() + "Z") if getattr(p, 'resolved_at', None) else None,
         "timestamp": (p.created_at.isoformat() + "Z") if p.created_at else "",
@@ -136,11 +210,23 @@ async def get_posts(
     pincode: Optional[str] = None,
     limit: int = Query(default=50, le=100),
     db: AsyncSession = Depends(get_db),
+    _user=Depends(get_optional_user),
 ):
     """Get community posts from database, with optional type and pincode filters."""
-    query = select(CommunityPost).where(CommunityPost.is_public == True)
+    requester_uid = (_user or {}).get("uid") if isinstance(_user, dict) else None
+    if requester_uid:
+        query = select(CommunityPost).where(
+            or_(
+                CommunityPost.is_public == True,
+                CommunityPost.user_id == requester_uid,
+            )
+        )
+    else:
+        query = select(CommunityPost).where(CommunityPost.is_public == True)
+
     if type:
-        query = query.where(CommunityPost.post_type == type)
+        normalized_type = "alert" if str(type).strip().lower() == "warning" else type
+        query = query.where(CommunityPost.post_type == normalized_type)
     query = query.order_by(CommunityPost.created_at.desc())
     # Load more if pincode filter will trim results
     query = query.limit(500 if pincode else limit)
@@ -311,6 +397,9 @@ async def create_post(
     if not post_content:
         raise HTTPException(status_code=400, detail="Post content, media, or valid image description is required")
 
+    requested_type = (request.type or "general").strip().lower()
+    post_type = "alert" if requested_type == "warning" else requested_type
+
     location_meta = {
         "name": request.location or "",
         "author": request.author or "Anonymous",
@@ -325,18 +414,29 @@ async def create_post(
     if isinstance(request.image_analysis, dict) and request.image_analysis:
         location_meta["image_analysis"] = request.image_analysis
 
+    verification = _default_verification_state(post_type)
+    if verification.get("requires_admin_review"):
+        verification["history"] = [
+            {
+                "status": "pending_admin_review",
+                "message": "Submitted by community and queued for admin verification.",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
+    location_meta["verification"] = verification
+
     db_post = CommunityPost(
         id=post_id,
         user_id=effective_user_id,
         content=post_content,
-        post_type=request.type,
+        post_type=post_type,
         media=request.media or [],
         location=location_meta,
         tags=request.tags or [],
         likes=0,
         shares=0,
         comments_count=0,
-        is_public=True,
+        is_public=not verification.get("requires_admin_review", False),
     )
     db.add(db_post)
     await db.commit()
@@ -345,14 +445,14 @@ async def create_post(
     post_dict = _post_to_dict(db_post)
 
     # Broadcast proximity notification for high-priority post types
-    if request.type in ("help", "emergency", "alert") and request.lat and request.lon:
+    if post_type in ("help", "offer") and request.lat and request.lon:
         try:
             from notifications import ws_manager, push_manager
             alert_payload = {
                 "type": "community_post",
-                "title": f"🚨 {request.type.capitalize()} nearby — {request.author}",
+                "title": f"🚨 {post_type.capitalize()} nearby — {request.author}",
                 "body": post_content[:150],
-                "post_type": request.type,
+                "post_type": post_type,
                 "id": post_id,
                 "author": request.author,
                 "content": post_content[:200],
@@ -381,7 +481,7 @@ async def create_post(
             if nearby_users:
                 wa_result = await sms_service.send_community_whatsapp(
                     recipients=nearby_users,
-                    post_type=request.type,
+                    post_type=post_type,
                     author=request.author or "Community Member",
                     location=request.location or "your area",
                     content=post_content,
@@ -401,6 +501,31 @@ async def create_post(
     return {"success": True, "post": post_dict}
 
 
+@community_router.get("/posts/{post_id}/verification")
+async def get_post_verification(
+    post_id: str,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_optional_user),
+):
+    """Return admin verification state for a community post."""
+    post = await db.get(CommunityPost, post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    requester_uid = (_user or {}).get("uid") if isinstance(_user, dict) else None
+    if not post.is_public and requester_uid != post.user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to view verification details")
+
+    location_meta = post.location if isinstance(post.location, dict) else {}
+    verification = _normalize_verification_state(location_meta, post.post_type)
+    return {
+        "post_id": post_id,
+        "type": post.post_type,
+        "is_public": bool(post.is_public),
+        "verification": verification,
+    }
+
+
 @community_router.post("/posts/{post_id}/like")
 async def like_post(
     post_id: str,
@@ -415,6 +540,7 @@ async def like_post(
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
+    like_notification: Optional[Notification] = None
     if unlike:
         post.likes = max(0, post.likes - 1)
     else:
@@ -422,7 +548,7 @@ async def like_post(
         # Notify post author at milestones (1, 5, 10, 25, 50 …)
         milestones = {1, 5, 10, 25, 50, 100}
         if post.likes in milestones and liker_id and post.user_id and liker_id != post.user_id:
-            db.add(Notification(
+            like_notification = Notification(
                 id=str(uuid.uuid4()),
                 user_id=post.user_id,
                 type="like",
@@ -433,9 +559,25 @@ async def like_post(
                 from_name=liker_name or "Community Member",
                 from_photo=liker_photo,
                 is_read=False,
-            ))
+            )
+            db.add(like_notification)
 
     await db.commit()
+
+    if like_notification:
+        try:
+            from notifications import ws_manager
+
+            await ws_manager.notify_user(
+                like_notification.user_id,
+                {
+                    "type": "in_app_notification",
+                    "notification": _notif_to_dict(like_notification),
+                },
+            )
+        except Exception as ws_exc:
+            logger.debug("Like notification websocket fanout failed: %s", ws_exc)
+
     return {"success": True, "liked": not unlike, "likes": post.likes}
 
 
@@ -537,6 +679,7 @@ async def add_comment(
     # Create notification for post author (skip self-notifications)
     commenter_id = request.author_id or request.author or "anonymous"
     post_owner_id = post.user_id or "anonymous"
+    comment_notification: Optional[Notification] = None
     if commenter_id != post_owner_id and post_owner_id not in ("anonymous", "You", None):
         notif_type = "reply" if request.parent_id else "comment"
         notif_title = (
@@ -544,7 +687,7 @@ async def add_comment(
             if request.parent_id
             else f"{request.author} commented on your post"
         )
-        db_notif = Notification(
+        comment_notification = Notification(
             id=str(uuid.uuid4()),
             user_id=post_owner_id,
             type=notif_type,
@@ -556,10 +699,24 @@ async def add_comment(
             from_photo=request.author_photo,
             is_read=False,
         )
-        db.add(db_notif)
+        db.add(comment_notification)
 
     await db.commit()
     await db.refresh(db_comment)
+
+    if comment_notification:
+        try:
+            from notifications import ws_manager
+
+            await ws_manager.notify_user(
+                comment_notification.user_id,
+                {
+                    "type": "in_app_notification",
+                    "notification": _notif_to_dict(comment_notification),
+                },
+            )
+        except Exception as ws_exc:
+            logger.debug("Comment notification websocket fanout failed: %s", ws_exc)
 
     return {"success": True, "comment": _comment_to_dict(db_comment)}
 
@@ -710,8 +867,38 @@ async def send_message(req: SendMessageRequest, db: AsyncSession = Depends(get_d
         content=req.content.strip(),
     )
     db.add(msg)
+
+    # Notify recipient in the bell dropdown.
+    dm_notification = Notification(
+        id=str(uuid.uuid4()),
+        user_id=req.to_user_id,
+        type="dm",
+        title=f"New message from {req.from_name or 'Community Member'}",
+        message=req.content.strip()[:180],
+        post_id=req.post_id,
+        from_user_id=req.from_user_id,
+        from_name=req.from_name or "Community Member",
+        from_photo=req.from_photo,
+        is_read=False,
+    )
+    db.add(dm_notification)
+
     await db.commit()
     await db.refresh(msg)
+
+    try:
+        from notifications import ws_manager
+
+        await ws_manager.notify_user(
+            req.to_user_id,
+            {
+                "type": "in_app_notification",
+                "notification": _notif_to_dict(dm_notification),
+            },
+        )
+    except Exception as ws_exc:
+        logger.debug("DM notification websocket fanout failed: %s", ws_exc)
+
     return {"success": True, "message": _dm_to_dict(msg)}
 
 
