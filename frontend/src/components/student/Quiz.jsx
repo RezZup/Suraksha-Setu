@@ -283,7 +283,7 @@ const QUIZ_DATA = {
   }
 };
 
-const Quiz = ({ category = 'earthquake' }) => {
+const Quiz = ({ category = 'earthquake', onComplete }) => {
   const [currentQuestion, setCurrentQuestion] = useState(0);
   const [selectedAnswer, setSelectedAnswer] = useState(null);
   const [showExplanation, setShowExplanation] = useState(false);
@@ -330,6 +330,16 @@ const Quiz = ({ category = 'earthquake' }) => {
       setSelectedAnswer(null);
       setShowExplanation(false);
     } else {
+      if (typeof onComplete === 'function') {
+        onComplete({
+          category,
+          score,
+          totalQuestions: questions.length,
+          percentage: Math.round((score / questions.length) * 100),
+          timeSpent,
+          completedAt: new Date().toISOString(),
+        });
+      }
       setQuizComplete(true);
     }
   };
