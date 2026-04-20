@@ -336,6 +336,31 @@ async def update_profile(
             loc["lon"] = body.gps_lon
         user.location = loc
 
+    # Keep runtime SMS registry in sync with persisted profile updates.
+    # Alert dispatcher reads from this registry for auto SMS flows.
+    try:
+        from sms_service import phone_registry
+
+        if user.phone:
+            loc = user.location if isinstance(user.location, dict) else {}
+            phone_registry.register(
+                uid=user.id,
+                phone=user.phone,
+                email=user.email or "",
+                name=user.full_name or user.username or "",
+                location={
+                    "lat": loc.get("lat", loc.get("latitude")),
+                    "lon": loc.get("lon", loc.get("longitude")),
+                    "gps_pincode": loc.get("gps_pincode") or loc.get("home_pincode") or loc.get("pin_code"),
+                    "city": loc.get("city"),
+                    "state": loc.get("state"),
+                },
+            )
+        else:
+            phone_registry.unregister(user.id)
+    except Exception as sync_err:
+        logger.warning("[Profile] SMS registry sync failed for user %s: %s", user_id, sync_err)
+
     await db.commit()
     await db.refresh(user)
     return {"success": True, "profile": _profile_dict(user)}

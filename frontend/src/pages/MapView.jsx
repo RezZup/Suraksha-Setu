@@ -37,6 +37,8 @@ import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Toolti
 import axios from 'axios';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+const ALERT_GEOCODE_BATCH_SIZE = 6;
+const ALERT_GEOCODE_MAX_MISSING = 60;
 
 const SERVICE_OPTIONS = [
   { id: 'hospital', label: 'Hospitals', icon: Hospital, accent: 'text-red-500' },
@@ -240,17 +242,32 @@ const MapView = () => {
   }, [filteredAlerts]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const fetchAllDisasterPoints = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/disasters?all_points=true&limit=5000`);
+        const data = await response.json();
+        const rows = (data.disasters || [])
+          .filter((d) => d?.lat != null && d?.lon != null)
+          .map((d) => ({ ...d, normalizedType: normalizeDisasterType(d) }));
+        if (!cancelled) {
+          setAllDisasters(rows);
+        }
+      } catch {
+        if (!cancelled) {
+          setAllDisasters([]);
+        }
+      }
+    };
+
     loadLocationData(center[0], center[1]);
     fetchAlerts();
-    fetch(`${API_URL}/api/disasters?limit=100`)
-      .then(r => r.json())
-      .then(data => {
-        const rows = (data.disasters || [])
-          .filter(d => d?.lat != null && d?.lon != null)
-          .map(d => ({ ...d, normalizedType: normalizeDisasterType(d) }));
-        setAllDisasters(rows);
-      })
-      .catch(() => {});
+    fetchAllDisasterPoints();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -293,7 +310,9 @@ const MapView = () => {
 
   const fetchAlerts = async () => {
     try {
-      const res = await axios.get(`${API_URL}/api/alerts`);
+      const res = await axios.get(`${API_URL}/api/alerts`, {
+        params: { limit: 5000 },
+      });
       const data = res.data?.alerts || res.data || [];
       const rows = Array.isArray(data) ? data : [];
 
@@ -318,17 +337,13 @@ const MapView = () => {
       };
 
       const normalized = await Promise.all(
-        rows.slice(0, 80).map(async (alert) => {
-          let coords = extractAlertCoordinates(alert);
-
-          if (!coords && typeof alert?.location === 'string') {
-            coords = await geocodeLocationText(alert.location);
-          }
-
+        rows.map(async (alert, index) => {
+          const coords = extractAlertCoordinates(alert);
           const normalizedSeverity = normalizeAlertSeverity(alert?.severity);
 
           return {
             ...alert,
+            __mapKey: `${alert?.id || 'alert'}_${index}`,
             normalizedSeverity,
             position: coords ? { lat: coords.lat, lon: coords.lon } : null,
             coordinates: coords
@@ -340,6 +355,37 @@ const MapView = () => {
 
       setAlerts(normalized);
       setUnmappedAlertsCount(normalized.filter((a) => !a.position).length);
+
+      // Geocode some missing-location alerts in small batches so map becomes interactive quickly.
+      const pendingGeocode = normalized
+        .filter((a) => !a.position && typeof a?.location === 'string')
+        .slice(0, ALERT_GEOCODE_MAX_MISSING);
+
+      for (let i = 0; i < pendingGeocode.length; i += ALERT_GEOCODE_BATCH_SIZE) {
+        const batch = pendingGeocode.slice(i, i + ALERT_GEOCODE_BATCH_SIZE);
+        const resolvedBatch = await Promise.all(
+          batch.map(async (alert) => {
+            const coords = await geocodeLocationText(alert.location);
+            if (!coords) return null;
+            return {
+              ...alert,
+              position: { lat: coords.lat, lon: coords.lon },
+              coordinates: { lat: coords.lat, lon: coords.lon },
+            };
+          })
+        );
+
+        const updates = new Map(
+          resolvedBatch
+            .filter(Boolean)
+            .map((item) => [item.__mapKey, item])
+        );
+
+        if (updates.size > 0) {
+          setAlerts((prev) => prev.map((item) => updates.get(item.__mapKey) || item));
+          setUnmappedAlertsCount((prev) => Math.max(0, prev - updates.size));
+        }
+      }
     } catch (e) {
       console.error('Failed to fetch alerts:', e);
     }

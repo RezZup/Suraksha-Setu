@@ -129,6 +129,23 @@ function timeAgo(ts) {
 
 // ─── Main component ────────────────────────────────────────────────────────────
 const CommunityMap = ({ posts, userLocation }) => {
+  const backendBase = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+
+  const toAbsoluteUrl = (url) => {
+    if (!url || typeof url !== 'string') return '';
+    if (/^https?:\/\//i.test(url)) return url;
+    return `${backendBase}${url.startsWith('/') ? '' : '/'}${url}`;
+  };
+
+  const resolveMediaUrl = (media) => {
+    return (
+      toAbsoluteUrl(media?.local_url || media?.backup_url)
+      || toAbsoluteUrl(media?.url)
+      || toAbsoluteUrl(media?.cdn_url)
+      || ''
+    );
+  };
+
   const geotagged = useMemo(
     () => posts.filter(p => p.lat != null && p.lon != null),
     [posts]
@@ -229,7 +246,7 @@ const CommunityMap = ({ posts, userLocation }) => {
                   {/* Media thumbnail */}
                   {post.media?.length > 0 && post.media[0]?.type?.startsWith('image') && (
                     <img
-                      src={post.media[0].url}
+                      src={resolveMediaUrl(post.media[0])}
                       alt="media"
                       style={{ width: '100%', marginTop: 8, borderRadius: 8, maxHeight: 140, objectFit: 'cover' }}
                     />

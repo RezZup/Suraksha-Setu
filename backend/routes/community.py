@@ -293,23 +293,26 @@ async def upload_community_image(
     }
     ext = ext_map.get(file.content_type, ".bin")
 
-    # Try Supabase Storage first, fall back to local disk
+    # Upload to local disk for guaranteed in-app preview; optionally also upload to Supabase.
     from ai.vision_pipeline import save_upload, analyze_community_image
     from utils.supabase_storage import upload_file as supabase_upload
 
     public_url: str
     local_path: str
+    cdn_url: Optional[str] = None
 
-    supabase_url = await supabase_upload(raw, (file.filename or f"upload{ext}"), file.content_type)
-    if supabase_url:
-        # Supabase succeeded – still save locally so Vision pipeline can read bytes
-        local_path = save_upload(raw, ext)
-        public_url = supabase_url
+    # Always save locally so image rendering never depends on external DNS/network.
+    local_path = save_upload(raw, ext)
+    filename = pathlib.Path(local_path).name
+    local_url = f"/uploads/{filename}"
+
+    # Best-effort CDN upload (kept as secondary URL).
+    cdn_url = await supabase_upload(raw, (file.filename or f"upload{ext}"), file.content_type)
+    media_url_mode = (os.getenv("COMMUNITY_MEDIA_URL_MODE", "local") or "local").strip().lower()
+    if media_url_mode == "supabase" and cdn_url:
+        public_url = cdn_url
     else:
-        # Fall back to local disk
-        local_path = save_upload(raw, ext)
-        filename = pathlib.Path(local_path).name
-        public_url = f"/uploads/{filename}"
+        public_url = local_url
 
     # Run vision pipeline for images only
     vision_result = None
@@ -321,6 +324,8 @@ async def upload_community_image(
 
     return {
         "url": public_url,
+        "local_url": local_url,
+        "cdn_url": cdn_url,
         "type": file.content_type,
         "name": file.filename,
         "analysis": vision_result,

@@ -32,8 +32,12 @@ const AIInput = ({
     const handleKeyDown = (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            onSubmit();
+            onSubmit?.();
         }
+    };
+
+    const handleSendClick = () => {
+        onSubmit?.();
     };
 
     return (
@@ -133,7 +137,7 @@ const AIInput = ({
 
                     {/* Send Button */}
                     <Button
-                        onClick={onSubmit}
+                        onClick={handleSendClick}
                         disabled={!value.trim() || disabled}
                         size="icon"
                         className={cn(

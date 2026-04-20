@@ -7,11 +7,22 @@ import logging
 import httpx
 import asyncio
 import uuid
+import os
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
 disasters_router = APIRouter(prefix="/api", tags=["Disasters"])
+
+DISASTER_CACHE_TTL_SECONDS = max(
+    15,
+    int(os.getenv("DISASTER_API_CACHE_TTL_SECONDS", "120")),
+)
+_DISASTER_CACHE: dict[str, object] = {
+    "expires_at": datetime.fromtimestamp(0, tz=timezone.utc),
+    "items": [],
+}
+_DISASTER_CACHE_LOCK = asyncio.Lock()
 
 
 def _parse_event_datetime(event_date: Optional[str]) -> Optional[datetime]:
@@ -289,59 +300,89 @@ async def _fetch_gdacs_disasters() -> list:
         return []
 
 
+async def _collect_disasters_from_sources() -> list:
+    """Fetch, merge and de-duplicate disaster data from all active sources."""
+    disasters = list(HISTORICAL_DISASTERS)
+
+    # Fetch real-time data in parallel.
+    real_time_results = await asyncio.gather(
+        _fetch_usgs_earthquakes(),
+        _fetch_gdacs_disasters(),
+        return_exceptions=True,
+    )
+
+    for result in real_time_results:
+        if isinstance(result, list):
+            disasters.extend(result)
+
+    # Try MOSDAC if available.
+    try:
+        from mosdac_service import get_mosdac_service
+        from data_transformers import (
+            transform_cyclone_data,
+            transform_flood_data,
+            merge_with_existing_disasters,
+        )
+
+        mosdac_service = get_mosdac_service()
+        mosdac_disasters = []
+
+        cyclone_entries = await mosdac_service.get_cyclone_data(days_back=14)
+        mosdac_disasters.extend(transform_cyclone_data(cyclone_entries))
+
+        flood_entries = await mosdac_service.get_flood_data(days_back=14)
+        mosdac_disasters.extend(transform_flood_data(flood_entries))
+
+        if mosdac_disasters:
+            disasters = merge_with_existing_disasters(mosdac_disasters, disasters)
+            logger.info("Merged %d MOSDAC disasters", len(mosdac_disasters))
+    except Exception as e:
+        logger.warning("MOSDAC unavailable: %s, using other sources", e)
+
+    # De-duplicate by id.
+    seen = set()
+    unique = []
+    for disaster in disasters:
+        disaster_id = disaster.get("id", "")
+        if disaster_id in seen:
+            continue
+        seen.add(disaster_id)
+        unique.append(disaster)
+
+    unique.sort(key=lambda x: x.get("date", ""), reverse=True)
+    return unique
+
+
+async def _get_cached_disasters() -> tuple[list, bool]:
+    """Return cached disasters if fresh, otherwise refresh cache once."""
+    now = datetime.now(timezone.utc)
+    cache_items = _DISASTER_CACHE.get("items") or []
+    cache_expires = _DISASTER_CACHE.get("expires_at")
+    if cache_items and isinstance(cache_expires, datetime) and now < cache_expires:
+        return list(cache_items), True
+
+    async with _DISASTER_CACHE_LOCK:
+        now = datetime.now(timezone.utc)
+        cache_items = _DISASTER_CACHE.get("items") or []
+        cache_expires = _DISASTER_CACHE.get("expires_at")
+        if cache_items and isinstance(cache_expires, datetime) and now < cache_expires:
+            return list(cache_items), True
+
+        refreshed_items = await _collect_disasters_from_sources()
+        _DISASTER_CACHE["items"] = refreshed_items
+        _DISASTER_CACHE["expires_at"] = now + timedelta(seconds=DISASTER_CACHE_TTL_SECONDS)
+        return list(refreshed_items), False
+
+
 @disasters_router.get("/disasters")
 async def get_disasters(
     disaster_type: Optional[str] = None,
-    limit: int = Query(default=50, le=100),
+    limit: int = Query(default=500, ge=1, le=5000),
+    all_points: bool = Query(default=False),
 ):
     """Get disaster data combining USGS earthquakes, GDACS alerts and MOSDAC satellite data."""
     try:
-        disasters = list(HISTORICAL_DISASTERS)
-
-        # ── Fetch real-time data in parallel ──────────────────────────────────
-        real_time_results = await asyncio.gather(
-            _fetch_usgs_earthquakes(),
-            _fetch_gdacs_disasters(),
-            return_exceptions=True,
-        )
-
-        for result in real_time_results:
-            if isinstance(result, list):
-                disasters.extend(result)
-
-        # ── Try MOSDAC (existing) ─────────────────────────────────────────────
-        try:
-            from mosdac_service import get_mosdac_service
-            from data_transformers import (
-                transform_cyclone_data,
-                transform_flood_data,
-                merge_with_existing_disasters,
-            )
-
-            mosdac_service = get_mosdac_service()
-            mosdac_disasters = []
-
-            cyclone_entries = await mosdac_service.get_cyclone_data(days_back=14)
-            mosdac_disasters.extend(transform_cyclone_data(cyclone_entries))
-
-            flood_entries = await mosdac_service.get_flood_data(days_back=14)
-            mosdac_disasters.extend(transform_flood_data(flood_entries))
-
-            if mosdac_disasters:
-                disasters = merge_with_existing_disasters(mosdac_disasters, disasters)
-                logger.info(f"Merged {len(mosdac_disasters)} MOSDAC disasters")
-        except Exception as e:
-            logger.warning(f"MOSDAC unavailable: {e}, using other sources")
-
-        # ── De-duplicate by id ────────────────────────────────────────────────
-        seen = set()
-        unique = []
-        for d in disasters:
-            did = d.get("id", "")
-            if did not in seen:
-                seen.add(did)
-                unique.append(d)
-        disasters = unique
+        disasters, from_cache = await _get_cached_disasters()
 
         if disaster_type:
             disasters = [
@@ -350,13 +391,21 @@ async def get_disasters(
 
         disasters.sort(key=lambda x: x.get("date", ""), reverse=True)
 
-        # Persist dedicated real-data training datasets (non-blocking to API response quality)
-        try:
-            await _persist_disaster_training_rows(disasters)
-        except Exception as persist_err:
-            logger.warning("Dataset persistence skipped due to error: %s", persist_err)
+        # Persist once when fresh data is collected, skip cache hits.
+        if not from_cache:
+            try:
+                await _persist_disaster_training_rows(disasters)
+            except Exception as persist_err:
+                logger.warning("Dataset persistence skipped due to error: %s", persist_err)
 
-        return {"disasters": disasters[:limit]}
+        payload = disasters if all_points else disasters[:limit]
+        return {
+            "disasters": payload,
+            "total": len(disasters),
+            "returned": len(payload),
+            "cached": from_cache,
+            "cache_ttl_seconds": DISASTER_CACHE_TTL_SECONDS,
+        }
 
     except Exception as e:
         logger.error(f"Error fetching disasters: {e}")

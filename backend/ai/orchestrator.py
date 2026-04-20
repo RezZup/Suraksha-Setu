@@ -7,6 +7,7 @@ import logging
 import json
 import hashlib
 import os
+import re
 from typing import Dict, Any
 from datetime import datetime, timezone
 
@@ -71,6 +72,67 @@ def _sanitize_content(text: str) -> str:
         start = cleaned.find("<think>")
         end = cleaned.find("</think>", start)
         cleaned = (cleaned[:start] + cleaned[end + len("</think>"):]).strip()
+
+    # Handle malformed/variant closing tags and keep only user-facing answer.
+    cleaned = re.sub(r"(?is)^.*?</(?:think|ink)>\s*", "", cleaned).strip()
+
+    # Drop leaked chain-of-thought style preambles when they appear untagged.
+    if re.match(r"(?is)^\s*(okay|alright|hmm|the user|i need to|let me|need to|user asked)\b", cleaned):
+        meta_hints = (
+            "the user", "i need to", "let me", "i should", "make sure",
+            "double-check", "keep it", "avoid any markdown", "use devanagari",
+            "severity level", "recommended precautions", "source", "citations",
+        )
+        parts = re.split(r"(?<=[.!?।])\s+|\n+", cleaned)
+        filtered_parts = []
+        dropping = True
+        for part in parts:
+            seg = part.strip()
+            if not seg:
+                continue
+            low = seg.lower()
+            is_meta = low.startswith(("okay", "alright", "hmm")) or any(h in low for h in meta_hints)
+            if dropping and is_meta:
+                continue
+            dropping = False
+            filtered_parts.append(seg)
+        if filtered_parts:
+            cleaned = " ".join(filtered_parts)
+
+    # Remove repetitive generic advisory that users asked to avoid.
+    cleaned = re.sub(
+        r"\s*for\s+real[- ]?time\s+alerts,?\s*check\s+imd(?:['’]s)?\s+website\s+or\s+(?:their|the)\s+app\.?\s*stay\s+safe!?\s*",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*(?:for\s+real[- ]?time\s+alerts,?\s*)?(?:please\s+)?check\s+imd(?:['’]s)?\s+(?:website|site)(?:\s+or\s+(?:their|the)\s+app)?\.?\s*",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove source/citation lines unless explicitly requested by caller.
+    kept_lines = []
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        low = stripped.lower()
+        if low.startswith(("source:", "sources:", "citation:", "citations:", "[source")):
+            continue
+        kept_lines.append(line)
+    cleaned = "\n".join(kept_lines)
+
+    # Convert markdown-ish formatting to plain text.
+    cleaned = cleaned.replace("**", "").replace("__", "").replace("`", "")
+    cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*[-*•]\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*\d+\.\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"\s+([,.;!?])", r"\1", cleaned)
     return cleaned.strip()
 
 
@@ -192,7 +254,7 @@ def _language_instruction(locale: str = None, language: str = None, message: str
             "exactly like a WhatsApp message. "
             "Use short, friendly sentences. Abbreviations like 'kl', 'hogi', 'skta', 'nhi' are fine. "
             "Do NOT use Devanagari script at all. "
-            "Example tone: 'sayd kal ho sakti hai, agar IMD ka record dekhu to thoda risk hai, "
+            "Example tone: 'sayd kal barish ho sakti hai, thoda risk lag raha hai, "
             "chhata rakh lena bhai!'"
         )
     if code == "hi":
@@ -265,6 +327,15 @@ class AIOrchestrator:
         lang_rule = _language_instruction(context.get("locale"), context.get("language"), message)
         if lang_rule:
             system_prompt = f"{system_prompt}\n\nLANGUAGE RULE:\n- {lang_rule}\n- Use the same language/script as the user message."
+
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            "FINAL ANSWER RULES:\n"
+            "- Return only the final user-facing answer.\n"
+            "- Never include internal reasoning, planning, or meta text (example: 'the user is asking...').\n"
+            "- Do not include source/citation text unless the user explicitly asks for sources.\n"
+            "- Do not use Markdown. Return plain text only."
+        )
 
         # 3.a Free-model fast path (Ollama) for simple conversational traffic.
         free_chat_first = os.getenv("FREE_CHAT_FIRST", "false").strip().lower() in {"1", "true", "yes", "on"}

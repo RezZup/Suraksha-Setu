@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Circle, Polyline, Tooltip, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -25,6 +25,65 @@ const FLATICON_ICONS = {
   alert_warning: 'https://cdn-icons-png.flaticon.com/512/1256/1256650.png',
   alert_info: 'https://cdn-icons-png.flaticon.com/512/3448/3448513.png',
 };
+
+const ALERT_ICON_CACHE = new Map();
+const DISASTER_ICON_CACHE = new Map();
+const SERVICE_ICON_CACHE = new Map();
+
+function useProgressiveMarkers(items, batchSize = 250) {
+  const safeItems = Array.isArray(items) ? items : [];
+  const [visibleCount, setVisibleCount] = useState(() => Math.min(batchSize, safeItems.length));
+
+  useEffect(() => {
+    const total = safeItems.length;
+    let active = true;
+    let timeoutHandle = null;
+    let frameHandle = null;
+
+    setVisibleCount(Math.min(batchSize, total));
+
+    if (total <= batchSize) {
+      return () => {
+        active = false;
+      };
+    }
+
+    const scheduleNext = () => {
+      if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+        frameHandle = window.requestAnimationFrame(step);
+      } else {
+        timeoutHandle = setTimeout(step, 16);
+      }
+    };
+
+    const step = () => {
+      if (!active) return;
+
+      setVisibleCount((prev) => {
+        if (prev >= total) return prev;
+        const next = Math.min(prev + batchSize, total);
+        if (next < total) {
+          scheduleNext();
+        }
+        return next;
+      });
+    };
+
+    scheduleNext();
+
+    return () => {
+      active = false;
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+      }
+      if (frameHandle !== null && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+        window.cancelAnimationFrame(frameHandle);
+      }
+    };
+  }, [safeItems, batchSize]);
+
+  return safeItems.slice(0, visibleCount);
+}
 
 const createFlaticonPin = ({
   iconUrl,
@@ -232,7 +291,11 @@ const createAlertIcon = (alert) => {
   const ringColor = isCritical ? '#DC2626' : isWarning ? '#F59E0B' : '#2563EB';
   const bg = isCritical ? '#EF4444' : isWarning ? '#F59E0B' : '#3B82F6';
 
-  return createFlaticonPin({
+  const cacheKey = `${iconKey}:${ringColor}:${bg}`;
+  const cached = ALERT_ICON_CACHE.get(cacheKey);
+  if (cached) return cached;
+
+  const icon = createFlaticonPin({
     iconUrl: FLATICON_ICONS[iconKey],
     fallbackLabel: '!',
     background: bg,
@@ -240,6 +303,8 @@ const createAlertIcon = (alert) => {
     size: 32,
     pinShape: false,
   });
+  ALERT_ICON_CACHE.set(cacheKey, icon);
+  return icon;
 };
 
 const DISASTER_ICON_META = {
@@ -278,7 +343,11 @@ const createDisasterIcon = (severity = 'low', type = 'disaster') => {
     : severity === 'moderate' ? '#EA580C'
     : '#1D4ED8';
 
-  return createFlaticonPin({
+  const cacheKey = `${normalized}:${severityRing}:${meta.color}`;
+  const cached = DISASTER_ICON_CACHE.get(cacheKey);
+  if (cached) return cached;
+
+  const icon = createFlaticonPin({
     iconUrl: FLATICON_ICONS[meta.iconKey],
     fallbackLabel: meta.label,
     background: meta.color,
@@ -286,6 +355,8 @@ const createDisasterIcon = (severity = 'low', type = 'disaster') => {
     size: 34,
     pinShape: false,
   });
+  DISASTER_ICON_CACHE.set(cacheKey, icon);
+  return icon;
 };
 
 const SERVICE_ICON_META = {
@@ -299,7 +370,10 @@ const SERVICE_ICON_META = {
 
 const createEmergencyServiceIcon = (serviceType = 'help_center') => {
   const meta = SERVICE_ICON_META[serviceType] || SERVICE_ICON_META.help_center;
-  return createFlaticonPin({
+  const cached = SERVICE_ICON_CACHE.get(serviceType);
+  if (cached) return cached;
+
+  const icon = createFlaticonPin({
     iconUrl: FLATICON_ICONS[meta.iconKey],
     fallbackLabel: meta.label,
     background: meta.color,
@@ -307,6 +381,8 @@ const createEmergencyServiceIcon = (serviceType = 'help_center') => {
     size: 32,
     pinShape: true,
   });
+  SERVICE_ICON_CACHE.set(serviceType, icon);
+  return icon;
 };
 
 // Component to recenter map
@@ -334,6 +410,43 @@ function MapInteractionSync({ onMapMoved }) {
 
 const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, searchRadius, alerts, disasters, emergencyServices, onMapMoved }) => {
   const [mapCenter, setMapCenter] = useState(center || [20.5937, 78.9629]); // Default: India
+
+  const validAlerts = useMemo(() => (
+    (alerts || [])
+      .map((alert) => {
+        const lat = Number(alert.coordinates?.lat ?? alert.position?.lat ?? alert.lat);
+        const lon = Number(alert.coordinates?.lon ?? alert.coordinates?.lng ?? alert.position?.lng ?? alert.position?.lon ?? alert.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+        return { ...alert, __lat: lat, __lon: lon };
+      })
+      .filter(Boolean)
+  ), [alerts]);
+
+  const validDisasters = useMemo(() => (
+    (disasters || [])
+      .map((item) => {
+        const lat = Number(item.lat);
+        const lon = Number(item.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+        return { ...item, __lat: lat, __lon: lon };
+      })
+      .filter(Boolean)
+  ), [disasters]);
+
+  const validEmergencyServices = useMemo(() => (
+    (emergencyServices || [])
+      .map((service) => {
+        const lat = Number(service.lat);
+        const lon = Number(service.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+        return { ...service, __lat: lat, __lon: lon };
+      })
+      .filter(Boolean)
+  ), [emergencyServices]);
+
+  const renderedAlerts = useProgressiveMarkers(validAlerts, 250);
+  const renderedDisasters = useProgressiveMarkers(validDisasters, 250);
+  const renderedEmergencyServices = useProgressiveMarkers(validEmergencyServices, 250);
 
   useEffect(() => {
     if (center) {
@@ -509,12 +622,9 @@ const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, se
       )}
 
       {/* Alert Markers */}
-      {alerts && alerts.length > 0 && alerts.map((alert, index) => {
-        const lat = Number(alert.coordinates?.lat ?? alert.position?.lat ?? alert.lat);
-        const lon = Number(alert.coordinates?.lon ?? alert.coordinates?.lng ?? alert.position?.lng ?? alert.position?.lon ?? alert.lon);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+      {renderedAlerts.length > 0 && renderedAlerts.map((alert, index) => {
         return (
-          <Marker key={`alert-${alert.id || index}`} position={[lat, lon]} icon={createAlertIcon(alert)} zIndexOffset={900}>
+          <Marker key={`alert-${alert.id || alert.__mapKey || index}`} position={[alert.__lat, alert.__lon]} icon={createAlertIcon(alert)} zIndexOffset={900}>
             <Tooltip direction="top" offset={[0, -10]} opacity={0.95}>
               <div className="text-xs">
                 <div><strong>{alert.title || alert.type || 'Alert'}</strong></div>
@@ -534,14 +644,11 @@ const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, se
       })}
 
       {/* Disaster Markers */}
-      {disasters && disasters.length > 0 && disasters.map((d, index) => {
-        const lat = Number(d.lat);
-        const lon = Number(d.lon);
-        if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
+      {renderedDisasters.length > 0 && renderedDisasters.map((d, index) => {
         return (
           <Marker
             key={`disaster-${d.id || index}`}
-            position={[lat, lon]}
+            position={[d.__lat, d.__lon]}
             icon={createDisasterIcon(d.severity, d.type)}
             zIndexOffset={700}
           >
@@ -568,14 +675,11 @@ const Map2D = ({ center, aqiStations, cycloneTrack, rainfallData, showLayers, se
       })}
 
       {/* Emergency Services Markers */}
-      {showLayers?.emergencyServices && emergencyServices && emergencyServices.length > 0 && emergencyServices.map((s, index) => {
-        const lat = Number(s.lat);
-        const lon = Number(s.lon);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+      {showLayers?.emergencyServices && renderedEmergencyServices.length > 0 && renderedEmergencyServices.map((s, index) => {
         return (
           <Marker
             key={`service-${s.id || index}`}
-            position={[lat, lon]}
+            position={[s.__lat, s.__lon]}
             icon={createEmergencyServiceIcon(s.service_type)}
             zIndexOffset={600}
           >

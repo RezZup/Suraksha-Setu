@@ -3,6 +3,14 @@ import { Send, Download, Loader2 } from 'lucide-react';
 import './ResearcherChat.css';
 
 const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api';
+const RESEARCHER_CHAT_STORAGE_KEY = 'suraksha_researcher_chat_v1';
+const RESEARCHER_SETTINGS_STORAGE_KEY = 'suraksha_researcher_chat_settings_v1';
+const RESEARCHER_WELCOME_MESSAGE = {
+    id: 1,
+    role: 'bot',
+    text: "Welcome to **Vigyan Drishti**.\nI can analyze disaster data, generate structured reports, and provide source-cited summaries.\nToggle **RAG mode** for document-grounded answers.",
+    timestamp: new Date(),
+};
 
 function detectLanguage(text = '') {
     if (!text) return 'en-IN';
@@ -20,23 +28,77 @@ function confidenceLabel(score) {
 }
 
 export default function ResearcherChat() {
-    const [messages, setMessages] = useState([
-        {
-            id: 1,
-            role: 'bot',
-            text: "Welcome to **Vigyan Drishti**.\nI can analyze disaster data, generate structured reports, and provide source-cited summaries.\nToggle **RAG mode** for document-grounded answers.",
-            timestamp: new Date(),
-        },
-    ]);
+    const [messages, setMessages] = useState(() => {
+        try {
+            const saved = localStorage.getItem(RESEARCHER_CHAT_STORAGE_KEY);
+            if (!saved) return [RESEARCHER_WELCOME_MESSAGE];
+            const parsed = JSON.parse(saved);
+            if (!Array.isArray(parsed) || parsed.length === 0) return [RESEARCHER_WELCOME_MESSAGE];
+            return parsed.map((msg) => ({
+                ...msg,
+                timestamp: msg?.timestamp ? new Date(msg.timestamp) : new Date(),
+            }));
+        } catch {
+            return [RESEARCHER_WELCOME_MESSAGE];
+        }
+    });
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
-    const [ragEnabled, setRagEnabled] = useState(false);
-    const [reportMode, setReportMode] = useState('summary'); // 'summary' | 'detailed'
+    const [ragEnabled, setRagEnabled] = useState(() => {
+        try {
+            const saved = localStorage.getItem(RESEARCHER_SETTINGS_STORAGE_KEY);
+            if (!saved) return false;
+            const parsed = JSON.parse(saved);
+            return Boolean(parsed?.ragEnabled);
+        } catch {
+            return false;
+        }
+    });
+    const [reportMode, setReportMode] = useState(() => {
+        try {
+            const saved = localStorage.getItem(RESEARCHER_SETTINGS_STORAGE_KEY);
+            if (!saved) return 'summary';
+            const parsed = JSON.parse(saved);
+            return parsed?.reportMode === 'detailed' ? 'detailed' : 'summary';
+        } catch {
+            return 'summary';
+        }
+    }); // 'summary' | 'detailed'
     const messagesEndRef = useRef(null);
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
+
+    useEffect(() => {
+        try {
+            localStorage.setItem(
+                RESEARCHER_CHAT_STORAGE_KEY,
+                JSON.stringify(
+                    messages.map((msg) => ({
+                        ...msg,
+                        timestamp:
+                            msg?.timestamp instanceof Date
+                                ? msg.timestamp.toISOString()
+                                : msg?.timestamp || new Date().toISOString(),
+                    }))
+                )
+            );
+        } catch {
+            // Ignore storage failures (private mode / quota limits)
+        }
+    }, [messages]);
+
+    useEffect(() => {
+        try {
+            localStorage.setItem(
+                RESEARCHER_SETTINGS_STORAGE_KEY,
+                JSON.stringify({ ragEnabled, reportMode })
+            );
+        } catch {
+            // Ignore storage failures (private mode / quota limits)
+        }
+    }, [ragEnabled, reportMode]);
 
     const sendMessage = useCallback(async (text) => {
         if (!text?.trim() || loading) return;

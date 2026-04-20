@@ -244,17 +244,31 @@ async def _dispatch_approved_community_post(
         "errors": [],
     }
 
+    # Even when coordinates are missing, continue the flow so Alert Center gets updated.
+    nearby_rows: List[Dict[str, Any]] = []
     if (lat is None or lon is None) and not pincode:
         summary["errors"].append("Post has neither coordinates nor pincode for nearby notifications")
-        return summary
+    else:
+        nearby_rows = await _collect_nearby_users_for_dispatch(
+            db=db,
+            lat=lat,
+            lon=lon,
+            radius_km=radius_km,
+            pincode=pincode,
+        )
 
-    nearby_rows = await _collect_nearby_users_for_dispatch(
-        db=db,
-        lat=lat,
-        lon=lon,
-        radius_km=radius_km,
-        pincode=pincode,
-    )
+    # Fallback: ensure post author still receives approval channel messages.
+    if not nearby_rows and post.user_id and str(post.user_id).strip().lower() not in {"", "anonymous", "you"}:
+        author_user = await db.get(User, post.user_id)
+        if author_user and author_user.is_active:
+            nearby_rows.append(
+                {
+                    "user": author_user,
+                    "distance_km": None,
+                    "matched_by": "author",
+                }
+            )
+
     summary["recipient_candidates"] = len(nearby_rows)
 
     message_text = _community_dispatch_text(post, location_label)

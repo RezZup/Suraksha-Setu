@@ -91,6 +91,10 @@ const getImageBlockReason = (files, type) => {
 const suggestPostType = (analysis) => {
   const dt = analysis?.disaster_type;
   if (!dt || dt === 'none') return null;
+  const confidence = Number(analysis?.confidence || 0);
+  const authenticity = analysis?.authenticity || 'uncertain';
+  // Do not auto-escalate post type on weak/uncertain image analysis.
+  if (authenticity !== 'likely_real' || confidence < 0.9) return null;
   const severity = analysis?.severity;
   if (severity === 'critical') return 'emergency';
   if (dt === 'fire' || dt === 'earthquake' || dt === 'cyclone') return 'alert';
@@ -183,7 +187,7 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
     setPendingUploads((n) => n + 1);
 
     // If photo has GPS location, auto-fill location field with human-readable address
-    if (fileData.geotag && fileData.geotag.latitude && fileData.geotag.longitude) {
+    if (fileData.geotag && fileData.geotag.latitude != null && fileData.geotag.longitude != null) {
       setAutoLocation(fileData.geotag);
       if (fileData.address && fileData.address.full) {
         setLocation(fileData.address.full);
@@ -201,11 +205,20 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
       const res = await axios.post(`${API_URL}/api/community/upload-image`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      const { url, analysis } = res.data;
+      const { url, analysis, local_url, cdn_url } = res.data;
 
       setUploadedFiles((prev) => {
         const updated = prev.map((f) =>
-          f.id === fileData.id ? { ...f, uploading: false, backendUrl: url, analysis } : f
+          f.id === fileData.id
+            ? {
+                ...f,
+                uploading: false,
+                backendUrl: url,
+                localUrl: local_url || url,
+                cdnUrl: cdn_url || null,
+                analysis,
+              }
+            : f
         );
 
         // After upload: if AI detected a disaster, auto-fill content & tags (if blank)
@@ -266,11 +279,31 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
       return;
     }
 
+    const geotaggedSources = uploadedFiles
+      .map((f) => ({ geotag: f.geotag, address: f.address }))
+      .filter((entry) => entry?.geotag && entry.geotag.latitude != null && entry.geotag.longitude != null)
+      .sort((a, b) => {
+        const accA = Number.isFinite(Number(a?.geotag?.accuracy)) ? Number(a.geotag.accuracy) : Number.POSITIVE_INFINITY;
+        const accB = Number.isFinite(Number(b?.geotag?.accuracy)) ? Number(b.geotag.accuracy) : Number.POSITIVE_INFINITY;
+        return accA - accB;
+      });
+    const bestGeo = geotaggedSources[0] || null;
+
+    const finalLat = bestGeo?.geotag?.latitude ?? autoLocation?.latitude ?? null;
+    const finalLon = bestGeo?.geotag?.longitude ?? autoLocation?.longitude ?? null;
+    const finalPincode = (bestGeo?.address?.pincode || '').trim() || undefined;
+    const finalLocation =
+      (bestGeo?.address?.full || '').trim()
+      || (location || '').trim()
+      || 'Unknown';
+
     // Build media array from successfully uploaded files
     const media = uploadedFiles
       .filter((f) => f.backendUrl)
       .map((f) => ({
         url: f.backendUrl,
+        local_url: f.localUrl || null,
+        cdn_url: f.cdnUrl || null,
         type: f.type || 'image/jpeg',
         name: f.name,
         geotag: f.geotag || null,
@@ -287,9 +320,10 @@ const CreatePostModal = ({ isOpen, onClose, onPostCreated }) => {
       type: postType,
       title: title.trim(),
       content: finalContent,
-      location: location.trim() || 'Unknown',
-      lat: autoLocation?.latitude || null,
-      lon: autoLocation?.longitude || null,
+      location: finalLocation,
+      lat: finalLat,
+      lon: finalLon,
+      pincode: finalPincode,
       tags,
       media,
       image_analysis: imageAnalysis,

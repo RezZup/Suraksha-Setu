@@ -3,6 +3,13 @@ import { Send, Mic, MicOff, Loader2 } from 'lucide-react';
 import './StudentChat.css';
 
 const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api';
+const STUDENT_CHAT_STORAGE_KEY = 'suraksha_student_chat_v1';
+const STUDENT_WELCOME_MESSAGE = {
+    id: 1,
+    role: 'bot',
+    text: "Namaste! 🙏 I'm **Gyan Setu** — your disaster-education buddy.\nAsk me anything about earthquakes, floods, cyclones, or safety! I can also quiz you. 🎯",
+    timestamp: new Date(),
+};
 
 const QUICK_ACTIONS = [
     { label: '💡 Explain', prompt: 'Explain simply' },
@@ -28,14 +35,20 @@ function confidenceLabel(score) {
 }
 
 export default function StudentChat() {
-    const [messages, setMessages] = useState([
-        {
-            id: 1,
-            role: 'bot',
-            text: "Namaste! 🙏 I'm **Gyan Setu** — your disaster-education buddy.\nAsk me anything about earthquakes, floods, cyclones, or safety! I can also quiz you. 🎯",
-            timestamp: new Date(),
-        },
-    ]);
+    const [messages, setMessages] = useState(() => {
+        try {
+            const saved = localStorage.getItem(STUDENT_CHAT_STORAGE_KEY);
+            if (!saved) return [STUDENT_WELCOME_MESSAGE];
+            const parsed = JSON.parse(saved);
+            if (!Array.isArray(parsed) || parsed.length === 0) return [STUDENT_WELCOME_MESSAGE];
+            return parsed.map((msg) => ({
+                ...msg,
+                timestamp: msg?.timestamp ? new Date(msg.timestamp) : new Date(),
+            }));
+        } catch {
+            return [STUDENT_WELCOME_MESSAGE];
+        }
+    });
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
     const [recording, setRecording] = useState(false);
@@ -46,6 +59,25 @@ export default function StudentChat() {
     // Auto-scroll
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [messages]);
+
+    useEffect(() => {
+        try {
+            localStorage.setItem(
+                STUDENT_CHAT_STORAGE_KEY,
+                JSON.stringify(
+                    messages.map((msg) => ({
+                        ...msg,
+                        timestamp:
+                            msg?.timestamp instanceof Date
+                                ? msg.timestamp.toISOString()
+                                : msg?.timestamp || new Date().toISOString(),
+                    }))
+                )
+            );
+        } catch {
+            // Ignore storage failures (private mode / quota limits)
+        }
     }, [messages]);
 
     // ─── Send message ───

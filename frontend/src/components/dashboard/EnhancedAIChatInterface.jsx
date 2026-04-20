@@ -14,6 +14,13 @@ import { toast } from 'sonner';
 import axios from 'axios';
 
 const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api';
+const DASHBOARD_CHAT_STORAGE_KEY = 'suraksha_dashboard_ai_chat_v1';
+const DASHBOARD_WELCOME_MESSAGE = {
+  id: 1,
+  type: 'bot',
+  text: 'Hi, I\'m Suraksha AI. Ask me anything about weather, disasters, safety, or emergency preparedness.',
+  timestamp: new Date(),
+};
 
 const detectLanguage = (text = '') => {
   if (!text) return 'en-IN';
@@ -27,15 +34,38 @@ const detectLanguage = (text = '') => {
   return 'en-IN';
 };
 
+const normalizeMessageText = (value, fallback = '') => {
+  if (typeof value === 'string') return value;
+  if (value === null || value === undefined) return fallback;
+
+  if (typeof value === 'object') {
+    if (typeof value.text === 'string') return value.text;
+    if (typeof value.message === 'string') return value.message;
+
+    // Ignore UI events accidentally passed from click handlers.
+    if (typeof value.preventDefault === 'function' || value.nativeEvent) {
+      return fallback;
+    }
+  }
+
+  return String(value);
+};
+
 const EnhancedAIChatInterface = () => {
-  const [messages, setMessages] = useState([
-    {
-      id: 1,
-      type: 'bot',
-      text: 'Hi, I\'m Suraksha AI. Ask me anything about weather, disasters, safety, or emergency preparedness.',
-      timestamp: new Date(),
-    },
-  ]);
+  const [messages, setMessages] = useState(() => {
+    try {
+      const saved = localStorage.getItem(DASHBOARD_CHAT_STORAGE_KEY);
+      if (!saved) return [DASHBOARD_WELCOME_MESSAGE];
+      const parsed = JSON.parse(saved);
+      if (!Array.isArray(parsed) || parsed.length === 0) return [DASHBOARD_WELCOME_MESSAGE];
+      return parsed.map((msg) => ({
+        ...msg,
+        timestamp: msg?.timestamp ? new Date(msg.timestamp) : new Date(),
+      }));
+    } catch {
+      return [DASHBOARD_WELCOME_MESSAGE];
+    }
+  });
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -60,6 +90,25 @@ const EnhancedAIChatInterface = () => {
       if (scrollContainer) {
         scrollContainer.scrollTop = scrollContainer.scrollHeight;
       }
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        DASHBOARD_CHAT_STORAGE_KEY,
+        JSON.stringify(
+          messages.map((msg) => ({
+            ...msg,
+            timestamp:
+              msg?.timestamp instanceof Date
+                ? msg.timestamp.toISOString()
+                : msg?.timestamp || new Date().toISOString(),
+          }))
+        )
+      );
+    } catch {
+      // Ignore storage failures (private mode / quota limits)
     }
   }, [messages]);
 
@@ -92,7 +141,7 @@ const EnhancedAIChatInterface = () => {
   }, []);
 
   const handleSendMessage = async (overrideText = null) => {
-    const content = String(overrideText ?? inputValue).trim();
+    const content = normalizeMessageText(overrideText, inputValue).trim();
     if (!content || isLoading) return;
 
     const userMessage = {
@@ -119,10 +168,15 @@ const EnhancedAIChatInterface = () => {
         context: { domain: 'dashboard', language: detectedLang, locale: detectedLang },
       });
 
+      const botText = normalizeMessageText(
+        response?.data?.response ?? response?.data?.message,
+        'I understood your request, but could not format the response. Please try again.'
+      ).trim();
+
       const botMessage = {
         id: Date.now() + 1,
         type: 'bot',
-        text: response.data.response,
+        text: botText,
         timestamp: new Date(),
         data: response.data.data,
       };
@@ -130,8 +184,8 @@ const EnhancedAIChatInterface = () => {
       setMessages((prev) => [...prev, botMessage]);
 
       // Auto-speak response if speech synthesis is available
-      if (response.data.response) {
-        speakText(response.data.response, detectedLang);
+      if (botText) {
+        speakText(botText, detectedLang);
       }
     } catch (error) {
       console.error('Error sending message:', error);
@@ -297,7 +351,7 @@ const EnhancedAIChatInterface = () => {
       const botMessage = {
         id: Date.now() + 1,
         type: 'bot',
-        text: response.data.response,
+        text: normalizeMessageText(response?.data?.response ?? response?.data?.message),
         timestamp: new Date(),
       };
 
@@ -338,7 +392,10 @@ const EnhancedAIChatInterface = () => {
             ).concat({
               id: Date.now() + 2,
               type: 'bot',
-              text: fallbackResponse?.data?.response || 'I heard you. Please retry once for better voice clarity.',
+              text: normalizeMessageText(
+                fallbackResponse?.data?.response ?? fallbackResponse?.data?.message,
+                'I heard you. Please retry once for better voice clarity.'
+              ),
               timestamp: new Date(),
             })
           );

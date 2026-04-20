@@ -189,6 +189,43 @@ async def lifespan(app: FastAPI):
 
     await init_db()
 
+    # Restore SMS phone registry from DB so auto-alert SMS survives restarts.
+    try:
+        from database import AsyncSessionLocal, User
+        from sqlalchemy import select
+        from sms_service import phone_registry, sms_service
+
+        restored = 0
+        async with AsyncSessionLocal() as _db:
+            result = await _db.execute(
+                select(User).where(User.is_active == True, User.phone.isnot(None))
+            )
+            users = result.scalars().all()
+
+            for user in users:
+                normalized_phone = sms_service._normalize_recipient_e164(user.phone or "")
+                if not normalized_phone:
+                    continue
+                loc = user.location if isinstance(user.location, dict) else {}
+                phone_registry.register(
+                    uid=user.id,
+                    phone=normalized_phone,
+                    email=user.email or "",
+                    name=user.full_name or user.username or "",
+                    location={
+                        "lat": loc.get("lat", loc.get("latitude")),
+                        "lon": loc.get("lon", loc.get("longitude")),
+                        "gps_pincode": loc.get("gps_pincode") or loc.get("home_pincode") or loc.get("pin_code"),
+                        "city": loc.get("city"),
+                        "state": loc.get("state"),
+                    },
+                )
+                restored += 1
+
+        logger.info("Restored %d SMS phone registration(s) from DB", restored)
+    except Exception as _e:
+        logger.warning("SMS phone registry restore failed: %s", _e)
+
     # Restore push subscriptions from DB so they survive server restarts
     try:
         from database import AsyncSessionLocal
@@ -639,16 +676,18 @@ async def get_alerts(
     radius_km: float = 100.0,
     severity=None,
     report_type=None,
+    limit: int = 1000,
     db: AsyncSession = Depends(get_db),
 ):
     """Get active alerts with optional geo-filtering."""
+    limit = max(1, min(int(limit or 200), 5000))
     query = select(Alert).where(Alert.is_active == True, Alert.retracted == False)
     if severity:
         query = query.where(func.lower(Alert.severity) == severity.lower())
     if report_type:
         query = query.where(func.lower(Alert.alert_type) == report_type.lower())
 
-    result = await db.execute(query.order_by(Alert.created_at.desc()).limit(200))
+    result = await db.execute(query.order_by(Alert.created_at.desc()).limit(limit))
     alerts = result.scalars().all()
 
     feedback_by_alert: dict[str, dict[str, int]] = {}

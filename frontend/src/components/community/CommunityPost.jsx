@@ -115,6 +115,33 @@ const CommunityPost = ({
   const [reportDescription, setReportDescription] = useState('');
   const [submittingReport, setSubmittingReport] = useState(false);
   const getAuthHeaders = () => getAuthHeadersForApi(process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000', 'citizen');
+  const backendBase = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+
+  const toAbsoluteUrl = (url) => {
+    if (!url || typeof url !== 'string') return '';
+    if (/^https?:\/\//i.test(url)) return url;
+    return `${backendBase}${url.startsWith('/') ? '' : '/'}${url}`;
+  };
+
+  const resolveMediaUrls = (media) => {
+    const local = toAbsoluteUrl(media?.local_url || media?.backup_url);
+    const primary = toAbsoluteUrl(media?.url);
+    const cdn = toAbsoluteUrl(media?.cdn_url);
+
+    if (local) {
+      return {
+        src: local,
+        fallback: primary && primary !== local ? primary : (cdn && cdn !== local ? cdn : ''),
+      };
+    }
+    if (primary) {
+      return {
+        src: primary,
+        fallback: cdn && cdn !== primary ? cdn : '',
+      };
+    }
+    return { src: media?.preview || '', fallback: '' };
+  };
 
   // Sync like count from parent when the post prop updates (e.g. after re-fetch)
   React.useEffect(() => {
@@ -492,9 +519,8 @@ const CommunityPost = ({
               mediaFiles.length >= 3 && "grid-cols-2"
             )}>
               {mediaFiles.slice(0, 4).map((media, index) => {
-                const mediaSrc = media.url
-                  ? (media.url.startsWith('http') ? media.url : `${process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000'}${media.url}`)
-                  : (media.preview || '');
+                const mediaUrls = resolveMediaUrls(media);
+                const mediaSrc = mediaUrls.src;
                 const mediaType = media.type || 'image/jpeg';
                 const mediaAnalysis = media.analysis?.analysis;
                 return (
@@ -518,6 +544,11 @@ const CommunityPost = ({
                         src={mediaSrc}
                         alt={media.name || 'photo'}
                         className="w-full h-full object-cover"
+                        onError={(e) => {
+                          if (mediaUrls.fallback && e.currentTarget.src !== mediaUrls.fallback) {
+                            e.currentTarget.src = mediaUrls.fallback;
+                          }
+                        }}
                       />
                       {media.geotag && (
                         <Badge 
@@ -809,9 +840,8 @@ const CommunityPost = ({
             {mediaFiles[selectedMediaIndex] && (() => {
               const sel = mediaFiles[selectedMediaIndex];
               const selType = sel.type || 'image/jpeg';
-              const selSrc = sel.url
-                ? (sel.url.startsWith('http') ? sel.url : `${process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000'}${sel.url}`)
-                : (sel.preview || '');
+              const selUrls = resolveMediaUrls(sel);
+              const selSrc = selUrls.src;
               return (
               <>
                 {/* Current Media */}
@@ -821,6 +851,11 @@ const CommunityPost = ({
                       src={selSrc}
                       alt={sel.name}
                       className="w-full max-h-[70vh] object-contain"
+                      onError={(e) => {
+                        if (selUrls.fallback && e.currentTarget.src !== selUrls.fallback) {
+                          e.currentTarget.src = selUrls.fallback;
+                        }
+                      }}
                     />
                   )}
                   {selType.startsWith('video/') && (
@@ -888,9 +923,8 @@ const CommunityPost = ({
                   <div className="flex gap-2 overflow-x-auto pb-2">
                     {mediaFiles.map((media, index) => {
                       const thumbType = media.type || 'image/jpeg';
-                      const thumbSrc = media.url
-                        ? (media.url.startsWith('http') ? media.url : `${process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000'}${media.url}`)
-                        : (media.preview || '');
+                      const thumbUrls = resolveMediaUrls(media);
+                      const thumbSrc = thumbUrls.src;
                       return (
                       <button
                         key={media.id || media.url || index}
@@ -907,6 +941,11 @@ const CommunityPost = ({
                             src={thumbSrc}
                             alt={media.name}
                             className="w-full h-full object-cover"
+                            onError={(e) => {
+                              if (thumbUrls.fallback && e.currentTarget.src !== thumbUrls.fallback) {
+                                e.currentTarget.src = thumbUrls.fallback;
+                              }
+                            }}
                           />
                         )}
                         {thumbType.startsWith('video/') && (
