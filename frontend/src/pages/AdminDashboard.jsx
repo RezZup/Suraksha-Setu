@@ -17,7 +17,8 @@ import {
   RefreshCw,
   Send,
   Bot,
-  Radio
+  Radio,
+  Database
 } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -103,6 +104,11 @@ const AdminDashboard = () => {
     push: false,
     websocket: false,
   });
+  const [dataSummary, setDataSummary] = useState(null);
+  const [ingestionRunning, setIngestionRunning] = useState(false);
+  const [ingestionMode, setIngestionMode] = useState('');
+  const [mosdacBackfillDays, setMosdacBackfillDays] = useState(7);
+  const [mosdacBackfillLimit, setMosdacBackfillLimit] = useState(80);
 
   const getAuthHeaders = () => {
     return getAuthHeadersForApi(API_URL, 'admin');
@@ -113,7 +119,7 @@ const AdminDashboard = () => {
     try {
       const authHeaders = getAuthHeaders();
       const authFetch = { fetchOptions: { headers: authHeaders } };
-      const [alertsRes, pendingRes, safetyRes, smsRes, incidentRes, smsLogRes, statsRes, logsRes, tgRes, bcRes, verificationRes] = await Promise.allSettled([
+      const [alertsRes, pendingRes, safetyRes, smsRes, incidentRes, smsLogRes, statsRes, logsRes, tgRes, bcRes, verificationRes, dataSummaryRes] = await Promise.allSettled([
         cachedFetchJson(`${API_URL}/admin/alerts`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/alerts/pending`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/safety/status`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
@@ -125,6 +131,7 @@ const AdminDashboard = () => {
         cachedFetchJson(`${API_URL}/admin/telegram/stats`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/broadcast/channels`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
         cachedFetchJson(`${API_URL}/admin/community-verification/posts?status=all&limit=100`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
+        cachedFetchJson(`${API_URL}/admin/data/summary?recent_hours=24`, { ttlMs: 30 * 1000, forceRefresh, ...authFetch }),
       ]);
       if (alertsRes.status === 'fulfilled') setAlerts(alertsRes.value?.alerts || alertsRes.value || []);
       if (pendingRes.status === 'fulfilled') setPendingAlerts(pendingRes.value?.pending_alerts || []);
@@ -137,6 +144,7 @@ const AdminDashboard = () => {
       if (tgRes.status === 'fulfilled') setTelegramStats(tgRes.value);
       if (bcRes.status === 'fulfilled') setBroadcastChannelStats(bcRes.value);
       if (verificationRes.status === 'fulfilled') setVerificationPosts(verificationRes.value?.posts || []);
+      if (dataSummaryRes.status === 'fulfilled') setDataSummary(dataSummaryRes.value);
       setLastUpdated(new Date());
     } catch (err) {
       console.error('Admin fetch error:', err);
@@ -498,6 +506,39 @@ const AdminDashboard = () => {
     }
   };
 
+  const handleRunIngestion = async (mode) => {
+    setIngestionRunning(true);
+    setIngestionMode(mode);
+    try {
+      const payload = {
+        source_mode: mode,
+        mosdac_days_back: Math.max(1, Math.min(Number(mosdacBackfillDays) || 7, 30)),
+        mosdac_limit_per_tile: Math.max(5, Math.min(Number(mosdacBackfillLimit) || 80, 300)),
+      };
+      const res = await fetch(`${API_URL}/admin/data/ingest/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || 'Ingestion run failed');
+
+      const stepKeys = Object.keys(data?.steps || {});
+      const okSteps = stepKeys.filter((key) => data?.steps?.[key]?.success).length;
+      setActionFeedback(`Ingestion completed (${mode}). ${okSteps}/${stepKeys.length} step(s) succeeded.`);
+
+      if (data?.data_summary) {
+        setDataSummary(data.data_summary);
+      }
+      fetchData(true);
+    } catch (err) {
+      setActionFeedback(`Error: ${err.message}`);
+    } finally {
+      setIngestionRunning(false);
+      setIngestionMode('');
+    }
+  };
+
   const activeAlerts = Array.isArray(alerts) ? alerts.filter(a => a.is_active && !a.retracted) : [];
   const handleManualRefresh = () => {
     fetchData();
@@ -539,6 +580,10 @@ const AdminDashboard = () => {
           <TabsTrigger value="overview" className="gap-2">
             <Server className="w-4 h-4" />
             {t('admin.overview')}
+          </TabsTrigger>
+          <TabsTrigger value="ingestion" className="gap-2">
+            <Database className="w-4 h-4" />
+            Data Ingestion
           </TabsTrigger>
           <TabsTrigger value="safety" className="gap-2">
             <Shield className="w-4 h-4" />
@@ -758,6 +803,168 @@ const AdminDashboard = () => {
           </CardContent>
         </Card>
       </div>
+        </TabsContent>
+
+        <TabsContent value="ingestion" className="space-y-6">
+          {actionFeedback && (
+            <Alert className="border-blue-200 bg-blue-50">
+              <AlertDescription className="text-blue-800">{actionFeedback}</AlertDescription>
+            </Alert>
+          )}
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Run Source Ingestion (Admin)</CardTitle>
+              <CardDescription>
+                Trigger real data fetch from MOSDAC and other sources, store to DB, and update existing records.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                <Button
+                  onClick={() => handleRunIngestion('all')}
+                  disabled={ingestionRunning}
+                  className="justify-start"
+                >
+                  {ingestionRunning && ingestionMode === 'all' ? 'Running...' : 'Run All Sources'}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => handleRunIngestion('mosdac')}
+                  disabled={ingestionRunning}
+                  className="justify-start"
+                >
+                  {ingestionRunning && ingestionMode === 'mosdac' ? 'Running...' : 'Run MOSDAC Poll'}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => handleRunIngestion('weather_aqi')}
+                  disabled={ingestionRunning}
+                  className="justify-start"
+                >
+                  {ingestionRunning && ingestionMode === 'weather_aqi' ? 'Running...' : 'Run Weather + AQI'}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => handleRunIngestion('disasters')}
+                  disabled={ingestionRunning}
+                  className="justify-start"
+                >
+                  {ingestionRunning && ingestionMode === 'disasters' ? 'Running...' : 'Run USGS + GDACS'}
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 border rounded-lg p-3">
+                <div>
+                  <label className="text-sm font-medium mb-1 block">MOSDAC Backfill Days</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={mosdacBackfillDays}
+                    onChange={(e) => setMosdacBackfillDays(Math.max(1, Math.min(30, Number(e.target.value) || 7)))}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1 block">MOSDAC Limit Per Tile</label>
+                  <Input
+                    type="number"
+                    min={5}
+                    max={300}
+                    value={mosdacBackfillLimit}
+                    onChange={(e) => setMosdacBackfillLimit(Math.max(5, Math.min(300, Number(e.target.value) || 80)))}
+                  />
+                </div>
+                <div className="flex items-end">
+                  <Button
+                    variant="destructive"
+                    onClick={() => handleRunIngestion('mosdac_backfill')}
+                    disabled={ingestionRunning}
+                    className="w-full"
+                  >
+                    {ingestionRunning && ingestionMode === 'mosdac_backfill' ? 'Backfilling...' : 'Run MOSDAC Backfill'}
+                  </Button>
+                </div>
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                All actions persist fetched data into dataset tables and update admin-visible DB counts below.
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Database Data Volume</CardTitle>
+              <CardDescription>
+                Current row counts by dataset and top source split (window: last {dataSummary?.recent_window_hours || 24}h).
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <Card className="border-dashed">
+                  <CardContent className="p-4">
+                    <p className="text-xs text-muted-foreground">Total Rows (all datasets)</p>
+                    <p className="text-2xl font-bold">{dataSummary?.totals?.rows_total ?? 0}</p>
+                  </CardContent>
+                </Card>
+                <Card className="border-dashed">
+                  <CardContent className="p-4">
+                    <p className="text-xs text-muted-foreground">Rows in Last 24h</p>
+                    <p className="text-2xl font-bold">{dataSummary?.totals?.rows_recent ?? 0}</p>
+                  </CardContent>
+                </Card>
+                <Card className="border-dashed">
+                  <CardContent className="p-4">
+                    <p className="text-xs text-muted-foreground">Avg Ingestion Quality</p>
+                    <p className="text-2xl font-bold">{dataSummary?.ingestion_logs?.average_quality_score ?? 0}</p>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="rounded-md border overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Dataset</TableHead>
+                      <TableHead>Total Rows</TableHead>
+                      <TableHead>Last 24h</TableHead>
+                      <TableHead>Last Seen</TableHead>
+                      <TableHead>Top Sources</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(dataSummary?.datasets || []).length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                          No data summary available yet.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    {(dataSummary?.datasets || []).map((row) => (
+                      <TableRow key={row.id}>
+                        <TableCell className="font-medium">{row.label}</TableCell>
+                        <TableCell>{row.rows_total ?? 0}</TableCell>
+                        <TableCell>{row.rows_recent ?? 0}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {row.last_seen ? new Date(row.last_seen).toLocaleString() : '—'}
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          {(row.sources || []).slice(0, 3).map((s) => `${s.source}: ${s.rows}`).join(' | ') || '—'}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+
+              <div className="text-xs text-muted-foreground">
+                Ingestion status: {Object.entries(dataSummary?.ingestion_logs?.status_breakdown || {})
+                  .map(([k, v]) => `${k}=${v}`)
+                  .join(', ') || 'no logs'}
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         {/* ═══════ COMMUNITY VERIFICATION TAB ═══════ */}

@@ -4,7 +4,25 @@ Admin API Routes for Alert Management, Users & Stats
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-from database import get_db, Alert, IncidentLog, User, CommunityReport, CommunityPost, AILog, UserReport, Notification
+from database import (
+    get_db,
+    Alert,
+    IncidentLog,
+    User,
+    CommunityReport,
+    CommunityPost,
+    AILog,
+    UserReport,
+    Notification,
+    WeatherDataset,
+    AQIDataset,
+    EarthquakeDataset,
+    FloodDataset,
+    HeatwaveDataset,
+    NearbyDisasterDataset,
+    MOSDACMetadata,
+    SourceIngestionLog,
+)
 from notifications import ws_manager
 from sqlalchemy import select, func
 from sqlalchemy.orm.attributes import flag_modified
@@ -677,6 +695,285 @@ class BroadcastGenerateRequest(BaseModel):
     language: str = "English"
 
 
+class AdminIngestionRunRequest(BaseModel):
+    source_mode: str = "all"  # all | alerts_cycle | mosdac | mosdac_backfill | weather_aqi | disasters
+    mosdac_days_back: int = 7
+    mosdac_limit_per_tile: int = 80
+    locations: Optional[List[Dict[str, Any]]] = None
+
+
+def _parse_training_locations_from_env() -> List[tuple[str, float, float]]:
+    """Parse DATASET_TRAINING_LOCATIONS (City:lat:lon,...) with sane defaults."""
+    defaults: List[tuple[str, float, float]] = [
+        ("New Delhi", 28.6139, 77.2090),
+        ("Mumbai", 19.0760, 72.8777),
+        ("Kolkata", 22.5726, 88.3639),
+        ("Chennai", 13.0827, 80.2707),
+        ("Bengaluru", 12.9716, 77.5946),
+    ]
+    raw = os.getenv("DATASET_TRAINING_LOCATIONS", "").strip()
+    if not raw:
+        return defaults
+
+    parsed: List[tuple[str, float, float]] = []
+    for item in raw.split(","):
+        parts = [p.strip() for p in item.split(":")]
+        if len(parts) != 3:
+            continue
+        city, lat_s, lon_s = parts
+        try:
+            parsed.append((city or "Unknown", float(lat_s), float(lon_s)))
+        except ValueError:
+            continue
+    return parsed or defaults
+
+
+def _normalize_manual_locations(locations: Optional[List[Dict[str, Any]]]) -> List[tuple[str, float, float]]:
+    if not locations:
+        return []
+
+    normalized: List[tuple[str, float, float]] = []
+    for idx, row in enumerate(locations):
+        if not isinstance(row, dict):
+            continue
+        city = str(row.get("city") or row.get("name") or f"location_{idx + 1}").strip()
+        try:
+            lat = float(row.get("lat"))
+            lon = float(row.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        normalized.append((city, lat, lon))
+    return normalized
+
+
+async def _run_weather_aqi_ingestion(locations: List[tuple[str, float, float]]) -> Dict[str, Any]:
+    """Fetch weather+AQI for each location and persist via existing route helpers."""
+    from routes.weather import _fetch_weather, _fetch_aqi
+
+    summary: Dict[str, Any] = {
+        "locations": len(locations),
+        "weather_ok": 0,
+        "aqi_ok": 0,
+        "errors": [],
+    }
+
+    for city, lat, lon in locations:
+        weather_res, aqi_res = await asyncio.gather(
+            _fetch_weather(lat, lon, city=city),
+            _fetch_aqi(lat, lon, city=city),
+            return_exceptions=True,
+        )
+
+        if isinstance(weather_res, Exception):
+            summary["errors"].append(f"weather:{city}:{weather_res}")
+        else:
+            summary["weather_ok"] += 1
+
+        if isinstance(aqi_res, Exception):
+            summary["errors"].append(f"aqi:{city}:{aqi_res}")
+        else:
+            summary["aqi_ok"] += 1
+
+    summary["errors"] = summary["errors"][:20]
+    return summary
+
+
+async def _run_disaster_source_ingestion() -> Dict[str, Any]:
+    """Fetch USGS + GDACS and persist earthquake/flood/heatwave rows."""
+    from routes.disasters import (
+        _fetch_usgs_earthquakes,
+        _fetch_gdacs_disasters,
+        _persist_disaster_training_rows,
+    )
+
+    summary: Dict[str, Any] = {
+        "usgs_rows": 0,
+        "gdacs_rows": 0,
+        "persisted_rows": 0,
+        "errors": [],
+    }
+
+    usgs_res, gdacs_res = await asyncio.gather(
+        _fetch_usgs_earthquakes(),
+        _fetch_gdacs_disasters(),
+        return_exceptions=True,
+    )
+
+    merged: List[Dict[str, Any]] = []
+    if isinstance(usgs_res, Exception):
+        summary["errors"].append(f"usgs:{usgs_res}")
+    elif isinstance(usgs_res, list):
+        summary["usgs_rows"] = len(usgs_res)
+        merged.extend(usgs_res)
+
+    if isinstance(gdacs_res, Exception):
+        summary["errors"].append(f"gdacs:{gdacs_res}")
+    elif isinstance(gdacs_res, list):
+        summary["gdacs_rows"] = len(gdacs_res)
+        merged.extend(gdacs_res)
+
+    if merged:
+        await _persist_disaster_training_rows(merged)
+        summary["persisted_rows"] = len(merged)
+
+    summary["errors"] = summary["errors"][:20]
+    return summary
+
+
+async def _run_mosdac_metadata_ingestion() -> Dict[str, Any]:
+    """Poll MOSDAC metadata now and persist new records."""
+    from ingest.mosdac_poller import mosdac_poller
+
+    metadata_results = await mosdac_poller.poll_all_datasets()
+    datasets: Dict[str, Dict[str, int]] = {}
+    total_polled = 0
+    total_stored = 0
+
+    for dataset_id, records in metadata_results.items():
+        stored = await mosdac_poller.store_metadata(records)
+        datasets[dataset_id] = {
+            "polled": len(records),
+            "stored": stored,
+        }
+        total_polled += len(records)
+        total_stored += stored
+
+    return {
+        "mode": "mosdac_poll",
+        "datasets": datasets,
+        "total_polled": total_polled,
+        "total_stored": total_stored,
+        "scan_config": mosdac_poller.scan_config(),
+    }
+
+
+async def _build_data_summary(db, recent_hours: int = 24) -> Dict[str, Any]:
+    """Summarize how much data exists in DB across all training/source tables."""
+    recent_window = max(1, min(recent_hours, 24 * 30))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=recent_window)
+
+    dataset_specs = [
+        {
+            "id": "weather",
+            "label": "Weather Dataset",
+            "model": WeatherDataset,
+            "time_col": WeatherDataset.ingested_at,
+            "source_col": WeatherDataset.source,
+        },
+        {
+            "id": "aqi",
+            "label": "AQI Dataset",
+            "model": AQIDataset,
+            "time_col": AQIDataset.ingested_at,
+            "source_col": AQIDataset.source,
+        },
+        {
+            "id": "earthquake",
+            "label": "Earthquake Dataset",
+            "model": EarthquakeDataset,
+            "time_col": EarthquakeDataset.ingested_at,
+            "source_col": EarthquakeDataset.source,
+        },
+        {
+            "id": "flood",
+            "label": "Flood Dataset",
+            "model": FloodDataset,
+            "time_col": FloodDataset.ingested_at,
+            "source_col": FloodDataset.source,
+        },
+        {
+            "id": "heatwave",
+            "label": "Heatwave Dataset",
+            "model": HeatwaveDataset,
+            "time_col": HeatwaveDataset.ingested_at,
+            "source_col": HeatwaveDataset.source,
+        },
+        {
+            "id": "nearby",
+            "label": "Nearby Dataset",
+            "model": NearbyDisasterDataset,
+            "time_col": NearbyDisasterDataset.captured_at,
+            "source_col": NearbyDisasterDataset.source,
+        },
+        {
+            "id": "mosdac",
+            "label": "MOSDAC Metadata",
+            "model": MOSDACMetadata,
+            "time_col": MOSDACMetadata.created_at,
+            "source_col": MOSDACMetadata.dataset_id,
+        },
+        {
+            "id": "ingestion_logs",
+            "label": "Source Ingestion Logs",
+            "model": SourceIngestionLog,
+            "time_col": SourceIngestionLog.ingested_at,
+            "source_col": SourceIngestionLog.source,
+        },
+    ]
+
+    datasets: List[Dict[str, Any]] = []
+    total_rows = 0
+    total_rows_recent = 0
+
+    for spec in dataset_specs:
+        model = spec["model"]
+        time_col = spec["time_col"]
+        source_col = spec["source_col"]
+
+        total = int((await db.execute(select(func.count(model.id)))).scalar() or 0)
+        recent = int((await db.execute(select(func.count(model.id)).where(time_col >= cutoff))).scalar() or 0)
+        last_seen_dt = (await db.execute(select(func.max(time_col)))).scalar()
+
+        source_rows = (await db.execute(
+            select(source_col, func.count(model.id))
+            .group_by(source_col)
+            .order_by(func.count(model.id).desc())
+            .limit(12)
+        )).all()
+
+        sources = [
+            {
+                "source": str(row[0] or "unknown"),
+                "rows": int(row[1] or 0),
+            }
+            for row in source_rows
+        ]
+
+        datasets.append({
+            "id": spec["id"],
+            "label": spec["label"],
+            "rows_total": total,
+            "rows_recent": recent,
+            "last_seen": last_seen_dt.isoformat() if last_seen_dt else None,
+            "sources": sources,
+        })
+        total_rows += total
+        total_rows_recent += recent
+
+    ingestion_status_rows = (await db.execute(
+        select(SourceIngestionLog.status, func.count(SourceIngestionLog.id))
+        .group_by(SourceIngestionLog.status)
+    )).all()
+    ingestion_status = {str(status or "unknown"): int(cnt or 0) for status, cnt in ingestion_status_rows}
+
+    avg_quality = (await db.execute(select(func.avg(SourceIngestionLog.quality_score)))).scalar()
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "recent_window_hours": recent_window,
+        "totals": {
+            "rows_total": total_rows,
+            "rows_recent": total_rows_recent,
+            "dataset_groups": len(datasets),
+        },
+        "ingestion_logs": {
+            "status_breakdown": ingestion_status,
+            "average_quality_score": round(float(avg_quality or 0.0), 3),
+        },
+        "datasets": datasets,
+    }
+
+
 # ==================== ADMIN STATS ENDPOINT ====================
 
 @router.get("/stats")
@@ -772,18 +1069,92 @@ async def get_admin_stats(db=Depends(get_db)):
             "ai_calls_today": ai_calls_today,
             "system_status": "operational",
         }
+
     except Exception as e:
         logger.error(f"Stats error: {e}")
         return {
-            "active_alerts": 0, "pending_alerts": 0, "total_alerts": 0,
-            "total_users": 0, "active_users": 0, "total_posts": 0,
-            "pending_reports": 0, "pending_post_verifications": 0,
-            "registered_phones": 0, "incidents": 0,
-            "ai_calls_today": 0, "system_status": "operational",
+            "active_alerts": 0,
+            "pending_alerts": 0,
+            "total_alerts": 0,
+            "total_users": 0,
+            "active_users": 0,
+            "total_posts": 0,
+            "pending_reports": 0,
+            "pending_post_verifications": 0,
+            "registered_phones": 0,
+            "incidents": 0,
+            "ai_calls_today": 0,
+            "system_status": "degraded",
         }
 
+@router.get("/data/summary")
+async def get_admin_data_summary(recent_hours: int = 24, db=Depends(get_db)):
+    """Detailed row counts by dataset/source so admin can audit stored data volume."""
+    return await _build_data_summary(db=db, recent_hours=recent_hours)
 
-# ==================== USER MANAGEMENT ====================
+
+@router.post("/data/ingest/run")
+async def run_admin_data_ingestion(body: AdminIngestionRunRequest, db=Depends(get_db), _admin=Depends(verify_firebase_token)):
+    """
+    Admin-triggered source ingestion:
+    - MOSDAC metadata (poll/backfill)
+    - Weather + AQI collection
+    - Disaster source fetch + persistence
+    - Full alert ingestion cycle
+    """
+    from ingest.manager import IngestionManager
+
+    mode = (body.source_mode or "all").strip().lower()
+    valid_modes = {"all", "alerts_cycle", "mosdac", "mosdac_backfill", "weather_aqi", "disasters"}
+    if mode not in valid_modes:
+        raise HTTPException(status_code=422, detail=f"source_mode must be one of: {sorted(valid_modes)}")
+
+    manual_locations = _normalize_manual_locations(body.locations)
+    locations = manual_locations or _parse_training_locations_from_env()
+
+    result: Dict[str, Any] = {
+        "success": True,
+        "mode": mode,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "steps": {},
+        "errors": [],
+    }
+
+    async def _step(step_id: str, coro):
+        try:
+            payload = await coro
+            result["steps"][step_id] = {"success": True, "result": payload}
+        except Exception as exc:
+            result["success"] = False
+            result["errors"].append(f"{step_id}: {exc}")
+            result["steps"][step_id] = {"success": False, "error": str(exc)}
+
+    if mode in {"all", "alerts_cycle"}:
+        await _step("alerts_cycle", IngestionManager.run_ingest_cycle(db))
+
+    if mode in {"all", "weather_aqi"}:
+        await _step("weather_aqi", _run_weather_aqi_ingestion(locations))
+
+    if mode in {"all", "disasters"}:
+        await _step("disasters", _run_disaster_source_ingestion())
+
+    if mode in {"all", "mosdac"}:
+        await _step("mosdac", _run_mosdac_metadata_ingestion())
+
+    if mode == "mosdac_backfill":
+        from ingest.mosdac_poller import mosdac_poller
+
+        days_back = max(1, min(int(body.mosdac_days_back or 7), 30))
+        per_tile = max(5, min(int(body.mosdac_limit_per_tile or 80), 300))
+        await _step(
+            "mosdac_backfill",
+            mosdac_poller.backfill_metadata(days_back=days_back, limit_per_tile=per_tile),
+        )
+
+    result["errors"] = result["errors"][:20]
+    result["finished_at"] = datetime.now(timezone.utc).isoformat()
+    result["data_summary"] = await _build_data_summary(db=db, recent_hours=24)
+    return result
 
 @router.get("/users")
 async def list_users(db=Depends(get_db)):

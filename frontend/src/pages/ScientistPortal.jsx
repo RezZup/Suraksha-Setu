@@ -20,6 +20,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from 'sonner';
 import DataExport from "@/components/scientist/DataExport";
 import ResearcherChat from "@/components/scientist/ResearcherChat";
+import { useAuth } from "@/contexts/AuthContext";
+import { getAuthHeadersForApi } from "@/utils/authHeaders";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
@@ -31,15 +33,36 @@ const FALLBACK_MODELS = [
 ];
 
 const ScientistPortal = () => {
+  const { user, token } = useAuth();
   const [uploadingData, setUploadingData] = useState(false);
   const [runningSimulation, setRunningSimulation] = useState(false);
   const [selectedModel, setSelectedModel] = useState(null);
   const [models, setModels] = useState([]);
   const [analytics, setAnalytics] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [exportFormat, setExportFormat] = useState('csv');
+  const [payloadMode, setPayloadMode] = useState('metadata');
+  const [exportLimit, setExportLimit] = useState(200000);
+
+  const userRole = String(user?.role || '').toLowerCase();
+  const isDeveloper = userRole === 'developer';
+
+  const getDeveloperHeaders = () => {
+    if (token) return { Authorization: `Bearer ${token}` };
+    return getAuthHeadersForApi(BACKEND_URL, 'developer');
+  };
 
   useEffect(() => {
-    fetch(`${BACKEND_URL}/api/scientist/models`)
+    if (!isDeveloper) {
+      setModels([]);
+      setAnalytics(null);
+      setAnalyticsLoading(false);
+      return;
+    }
+
+    const headers = getDeveloperHeaders();
+
+    fetch(`${BACKEND_URL}/api/scientist/models`, { headers })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (data?.models?.length) setModels(data.models);
@@ -48,12 +71,12 @@ const ScientistPortal = () => {
       .catch(() => setModels(FALLBACK_MODELS));
 
     setAnalyticsLoading(true);
-    fetch(`${BACKEND_URL}/api/scientist/analytics/overview`)
+    fetch(`${BACKEND_URL}/api/scientist/analytics/overview`, { headers })
       .then(r => r.ok ? r.json() : null)
       .then(data => setAnalytics(data))
       .catch(() => setAnalytics(null))
       .finally(() => setAnalyticsLoading(false));
-  }, []);
+  }, [isDeveloper, token]);
 
   const handleUploadDataset = () => {
     const input = document.createElement('input');
@@ -68,8 +91,10 @@ const ScientistPortal = () => {
       formData.append('file', file);
 
       try {
+        const headers = getDeveloperHeaders();
         const response = await fetch(`${BACKEND_URL}/api/scientist/upload-dataset`, {
           method: 'POST',
+          headers,
           body: formData,
           credentials: 'include'
         });
@@ -91,9 +116,13 @@ const ScientistPortal = () => {
   const handleRunSimulation = async () => {
     setRunningSimulation(true);
     try {
+      const headers = getDeveloperHeaders();
       const response = await fetch(`${BACKEND_URL}/api/scientist/run-simulation`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...headers,
+        },
         body: JSON.stringify({
           model: selectedModel || 'flood_prediction',
           parameters: {
@@ -119,7 +148,9 @@ const ScientistPortal = () => {
 
   const handleExportModel = async (modelId) => {
     try {
+      const headers = getDeveloperHeaders();
       const response = await fetch(`${BACKEND_URL}/api/scientist/export-model/${modelId}`, {
+        headers,
         credentials: 'include'
       });
 
@@ -150,8 +181,10 @@ const ScientistPortal = () => {
       formData.append('file', file);
 
       try {
+        const headers = getDeveloperHeaders();
         const response = await fetch(`${BACKEND_URL}/api/scientist/import-model`, {
           method: 'POST',
+          headers,
           body: formData,
           credentials: 'include'
         });
@@ -179,7 +212,13 @@ const ScientistPortal = () => {
 
   const handleExportTrainingDataset = async (datasetType) => {
     try {
-      const response = await fetch(`${BACKEND_URL}/api/scientist/datasets/export/${datasetType}?limit=200000`);
+      const headers = getDeveloperHeaders();
+      const params = new URLSearchParams({
+        limit: String(Math.max(1, Math.min(exportLimit || 50000, 200000))),
+        format: exportFormat,
+        payload_mode: payloadMode,
+      });
+      const response = await fetch(`${BACKEND_URL}/api/scientist/datasets/export/${datasetType}?${params.toString()}`, { headers });
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
         throw new Error(err.detail || `Failed to export ${datasetType} dataset`);
@@ -189,14 +228,34 @@ const ScientistPortal = () => {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${datasetType}_dataset.csv`;
+      a.download = `${datasetType}_${payloadMode}_dataset.${exportFormat}`;
       a.click();
       window.URL.revokeObjectURL(url);
-      toast.success(`${datasetType} dataset exported as CSV`);
+      toast.success(`${datasetType} dataset exported as ${exportFormat.toUpperCase()}`);
     } catch (error) {
       toast.error(error.message || `Error exporting ${datasetType} dataset`);
     }
   };
+
+  if (!isDeveloper) {
+    return (
+      <div className="max-w-3xl mx-auto space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>Developer Access Required</CardTitle>
+            <CardDescription>
+              Scientist portal dataset ingestion and export features are restricted to developer users.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Current role: {userRole || 'unknown'}. Sign in with a developer account to access full source export tools.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -593,6 +652,41 @@ const ScientistPortal = () => {
           <div className="space-y-6">
             <Card>
               <CardHeader>
+                <CardTitle>Export Options</CardTitle>
+                <CardDescription>Download metadata, raw source payloads, or both in CSV/JSON format.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Format</label>
+                  <select className="w-full p-2 border rounded" value={exportFormat} onChange={(e) => setExportFormat(e.target.value)}>
+                    <option value="csv">CSV</option>
+                    <option value="json">JSON</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Payload Mode</label>
+                  <select className="w-full p-2 border rounded" value={payloadMode} onChange={(e) => setPayloadMode(e.target.value)}>
+                    <option value="metadata">Metadata Only</option>
+                    <option value="raw">Raw Source Only</option>
+                    <option value="both">Metadata + Raw</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Row Limit</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="200000"
+                    value={exportLimit}
+                    onChange={(e) => setExportLimit(Number(e.target.value) || 50000)}
+                    className="w-full p-2 border rounded"
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
                 <CardTitle>Training Dataset Exports</CardTitle>
                 <CardDescription>Download stored real datasets as CSV for model training.</CardDescription>
               </CardHeader>
@@ -617,6 +711,9 @@ const ScientistPortal = () => {
                 </Button>
                 <Button variant="outline" className="justify-start gap-2" onClick={() => handleExportTrainingDataset('ingestion')}>
                   <Download className="w-4 h-4" /> Source Log CSV
+                </Button>
+                <Button variant="outline" className="justify-start gap-2" onClick={() => handleExportTrainingDataset('mosdac')}>
+                  <Download className="w-4 h-4" /> MOSDAC Metadata
                 </Button>
               </CardContent>
             </Card>

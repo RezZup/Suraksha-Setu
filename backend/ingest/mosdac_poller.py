@@ -10,6 +10,7 @@ Architecture:
 """
 import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
@@ -66,6 +67,39 @@ INDIA_REGIONS = {
 }
 
 
+def _build_india_tiles(
+    lon_min: float = 68.0,
+    lon_max: float = 98.0,
+    lat_min: float = 6.0,
+    lat_max: float = 38.0,
+    step_deg: float = 4.0,
+) -> List[Dict[str, Any]]:
+    """Create a deterministic tile grid covering India and nearby waters."""
+    tiles = []
+    row = 0
+    lat = lat_min
+    while lat < lat_max:
+        row += 1
+        col = 0
+        lon = lon_min
+        lat_next = min(lat + step_deg, lat_max)
+        while lon < lon_max:
+            col += 1
+            lon_next = min(lon + step_deg, lon_max)
+            tiles.append(
+                {
+                    "tile_id": f"IN_R{row:02d}_C{col:02d}",
+                    "bbox": f"{lon:.2f},{lat:.2f},{lon_next:.2f},{lat_next:.2f}",
+                }
+            )
+            lon = lon_next
+        lat = lat_next
+    return tiles
+
+
+INDIA_TILE_GRID = _build_india_tiles()
+
+
 class MOSDACPoller:
     """
     Layer 1: Metadata Polling
@@ -78,8 +112,178 @@ class MOSDACPoller:
         self.service = get_mosdac_service()
         self._last_poll: Dict[str, datetime] = {}
         self._running = False
+        self.full_india_scan = os.getenv("MOSDAC_ENABLE_FULL_INDIA_SCAN", "false").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        self.full_scan_hours_back = max(6, int(os.getenv("MOSDAC_FULL_SCAN_HOURS_BACK", "24")))
+        self.full_scan_limit_per_tile = max(5, int(os.getenv("MOSDAC_FULL_SCAN_LIMIT_PER_TILE", "50")))
+        self.full_scan_chunk_days = max(1, int(os.getenv("MOSDAC_FULL_SCAN_CHUNK_DAYS", "1")))
+        self.india_tiles = INDIA_TILE_GRID
 
-    async def poll_metadata(self, dataset_id: str, region_bbox: str = None,
+    @staticmethod
+    def _parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
+        if not ts:
+            return None
+        if isinstance(ts, datetime):
+            return ts
+        normalized = str(ts).strip()
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _chunk_day_ranges(days_back: int, chunk_days: int) -> List[Dict[str, str]]:
+        """Split lookback period into date chunks suitable for MOSDAC date filters."""
+        now = datetime.now(timezone.utc)
+        day_end = now.date()
+        day_start = (now - timedelta(days=max(1, days_back))).date()
+
+        chunks: List[Dict[str, str]] = []
+        cursor = day_start
+        while cursor <= day_end:
+            chunk_end = min(cursor + timedelta(days=max(1, chunk_days) - 1), day_end)
+            chunks.append(
+                {
+                    "start": cursor.isoformat(),
+                    "end": chunk_end.isoformat(),
+                }
+            )
+            cursor = chunk_end + timedelta(days=1)
+        return chunks
+
+    def _entries_to_metadata_records(
+        self,
+        dataset_id: str,
+        entries: List[Dict[str, Any]],
+        tile_id: Optional[str] = None,
+        query_bbox: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        for entry in entries:
+            raw_entry = entry if isinstance(entry, dict) else {}
+            raw_metadata = dict(raw_entry)
+            if tile_id:
+                raw_metadata["_suraksha_tile"] = tile_id
+            if query_bbox:
+                raw_metadata["_suraksha_query_bbox"] = query_bbox
+
+            record = {
+                "product_id": raw_entry.get("id", str(uuid.uuid4())),
+                "identifier": raw_entry.get("identifier", "unknown"),
+                "dataset_id": dataset_id,
+                "timestamp": raw_entry.get("updated", raw_entry.get("published")),
+                "bounding_box": raw_entry.get("georss_box") or raw_entry.get("georss_polygon"),
+                "raw_metadata": raw_metadata,
+                "downloaded": False,
+            }
+            records.append(record)
+        return records
+
+    async def poll_metadata_full_india(
+        self,
+        dataset_id: str,
+        hours_back: Optional[int] = None,
+        limit_per_tile: Optional[int] = None,
+        chunk_days: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Poll MOSDAC across a fixed India tile grid and date chunks.
+        This increases practical coverage versus a single national query.
+        """
+        lookback_hours = hours_back or self.full_scan_hours_back
+        days_back = max(1, int((lookback_hours + 23) // 24))
+        per_tile_limit = limit_per_tile or self.full_scan_limit_per_tile
+        date_chunks = self._chunk_day_ranges(days_back=days_back, chunk_days=chunk_days or self.full_scan_chunk_days)
+
+        dedup: Dict[str, Dict[str, Any]] = {}
+
+        try:
+            for tile in self.india_tiles:
+                tile_id = tile["tile_id"]
+                bbox = tile["bbox"]
+
+                for date_chunk in date_chunks:
+                    entries = await self.service.search_datasets(
+                        dataset_id=dataset_id,
+                        start_time=date_chunk["start"],
+                        end_time=date_chunk["end"],
+                        bounding_box=bbox,
+                        limit=per_tile_limit,
+                    )
+
+                    for rec in self._entries_to_metadata_records(
+                        dataset_id=dataset_id,
+                        entries=entries,
+                        tile_id=tile_id,
+                        query_bbox=bbox,
+                    ):
+                        key = rec.get("product_id") or f"{rec.get('identifier', 'unknown')}::{rec.get('timestamp', '')}"
+                        if key and key not in dedup:
+                            dedup[key] = rec
+
+            self._last_poll[dataset_id] = datetime.now(timezone.utc)
+            records = list(dedup.values())
+            logger.info(
+                "[Layer 1] Full-India scan %s: %d unique records across %d tiles and %d date chunks",
+                dataset_id,
+                len(records),
+                len(self.india_tiles),
+                len(date_chunks),
+            )
+            return records
+        except Exception as e:
+            logger.error(f"[Layer 1] Full-India metadata poll error for {dataset_id}: {e}")
+            return []
+
+    async def backfill_metadata(
+        self,
+        days_back: int = 7,
+        limit_per_tile: int = 80,
+    ) -> Dict[str, Any]:
+        """Backfill MOSDAC metadata for all monitored datasets using India tiles."""
+        lookback_hours = max(24, days_back * 24)
+        summary: Dict[str, Any] = {
+            "days_back": days_back,
+            "mode": "full_india_backfill",
+            "tiles": len(self.india_tiles),
+            "datasets": {},
+            "total_polled": 0,
+            "total_stored": 0,
+            "ran_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        for dataset_id in MONITORED_DATASETS.keys():
+            records = await self.poll_metadata_full_india(
+                dataset_id=dataset_id,
+                hours_back=lookback_hours,
+                limit_per_tile=limit_per_tile,
+                chunk_days=max(1, self.full_scan_chunk_days),
+            )
+            stored = await self.store_metadata(records)
+            summary["datasets"][dataset_id] = {
+                "polled": len(records),
+                "stored": stored,
+            }
+            summary["total_polled"] += len(records)
+            summary["total_stored"] += stored
+
+        return summary
+
+    def scan_config(self) -> Dict[str, Any]:
+        """Expose current scan mode configuration for observability endpoints."""
+        return {
+            "full_india_scan_enabled": self.full_india_scan,
+            "full_scan_hours_back": self.full_scan_hours_back,
+            "full_scan_limit_per_tile": self.full_scan_limit_per_tile,
+            "full_scan_chunk_days": self.full_scan_chunk_days,
+            "india_tile_count": len(self.india_tiles),
+            "india_bbox": {"lon_min": 68.0, "lon_max": 98.0, "lat_min": 6.0, "lat_max": 38.0},
+        }
+
+    async def poll_metadata(self, dataset_id: str, region_bbox: Optional[str] = None,
                             hours_back: int = 6) -> List[Dict[str, Any]]:
         """
         Poll MOSDAC for metadata only (lightweight).
@@ -97,18 +301,11 @@ class MOSDACPoller:
                 limit=20,
             )
 
-            metadata_records = []
-            for entry in entries:
-                record = {
-                    "product_id": entry.get("id", str(uuid.uuid4())),
-                    "identifier": entry.get("identifier", "unknown"),
-                    "dataset_id": dataset_id,
-                    "timestamp": entry.get("updated", entry.get("published")),
-                    "bounding_box": entry.get("georss_box") or entry.get("georss_polygon"),
-                    "raw_metadata": entry,
-                    "downloaded": False,
-                }
-                metadata_records.append(record)
+            metadata_records = self._entries_to_metadata_records(
+                dataset_id=dataset_id,
+                entries=entries,
+                query_bbox=region_bbox,
+            )
 
             self._last_poll[dataset_id] = datetime.now(timezone.utc)
             logger.info(f"[Layer 1] Polled {dataset_id}: {len(metadata_records)} entries found")
@@ -130,7 +327,15 @@ class MOSDACPoller:
             if last and (now - last) < interval:
                 continue
 
-            entries = await self.poll_metadata(dataset_id)
+            if self.full_india_scan:
+                entries = await self.poll_metadata_full_india(
+                    dataset_id=dataset_id,
+                    hours_back=self.full_scan_hours_back,
+                    limit_per_tile=self.full_scan_limit_per_tile,
+                    chunk_days=self.full_scan_chunk_days,
+                )
+            else:
+                entries = await self.poll_metadata(dataset_id)
             if entries:
                 results[dataset_id] = entries
 
@@ -145,26 +350,34 @@ class MOSDACPoller:
         try:
             async with AsyncSessionLocal() as db:
                 for rec in records:
-                    existing = await db.execute(
-                        select(MOSDACMetadata.id)
-                        .where(MOSDACMetadata.product_id == rec["product_id"])
-                        .limit(1)
-                    )
-                    if existing.scalar_one_or_none():
-                        continue
+                    try:
+                        product_id = rec.get("product_id")
+                        if not product_id:
+                            continue
 
-                    meta = MOSDACMetadata(
-                        id=str(uuid.uuid4()),
-                        product_id=rec["product_id"],
-                        identifier=rec["identifier"],
-                        dataset_id=rec["dataset_id"],
-                        timestamp=datetime.fromisoformat(rec["timestamp"]) if rec.get("timestamp") else None,
-                        bounding_box={"raw": rec["bounding_box"]} if rec.get("bounding_box") else None,
-                        raw_metadata=rec["raw_metadata"],
-                        downloaded=False,
-                    )
-                    db.add(meta)
-                    stored += 1
+                        existing = await db.execute(
+                            select(MOSDACMetadata.id)
+                            .where(MOSDACMetadata.product_id == product_id)
+                            .limit(1)
+                        )
+                        if existing.scalar_one_or_none():
+                            continue
+
+                        meta = MOSDACMetadata(
+                            id=str(uuid.uuid4()),
+                            product_id=product_id,
+                            identifier=rec.get("identifier", "unknown"),
+                            dataset_id=rec.get("dataset_id", "unknown"),
+                            timestamp=self._parse_timestamp(rec.get("timestamp")),
+                            bounding_box={"raw": rec.get("bounding_box")} if rec.get("bounding_box") else None,
+                            raw_metadata=rec.get("raw_metadata") or {},
+                            downloaded=bool(rec.get("downloaded", False)),
+                        )
+                        db.add(meta)
+                        stored += 1
+                    except Exception as row_error:
+                        logger.warning("[Layer 1] Skipping invalid metadata row: %s", row_error)
+                        continue
 
                 await db.commit()
         except Exception as e:
@@ -187,7 +400,7 @@ class EventBasedDownloader:
         self.service = get_mosdac_service()
 
     async def should_download(self, event_type: str, risk_score: float,
-                              event_data: Dict = None) -> bool:
+                              event_data: Optional[Dict] = None) -> bool:
         """
         Determine if a download should be triggered.
         Uses deterministic rules — AI does NOT decide this.
@@ -306,8 +519,8 @@ class MOSDACReportGenerator:
         self.service = get_mosdac_service()
         self.downloader = EventBasedDownloader()
 
-    async def generate_flood_report(self, region: str, start_date: str = None,
-                                    end_date: str = None) -> Dict[str, Any]:
+    async def generate_flood_report(self, region: str, start_date: Optional[str] = None,
+                                    end_date: Optional[str] = None) -> Dict[str, Any]:
         """
         Generate a structured flood risk report for a region.
         Uses MOSDAC rainfall + soil moisture data.
@@ -513,9 +726,9 @@ class MOSDACReportGenerator:
 
         return report
 
-    async def search_satellite_data(self, dataset_id: str, satellite: str = None,
-                                    region: str = None, start_date: str = None,
-                                    end_date: str = None) -> Dict[str, Any]:
+    async def search_satellite_data(self, dataset_id: str, satellite: Optional[str] = None,
+                                    region: Optional[str] = None, start_date: Optional[str] = None,
+                                    end_date: Optional[str] = None) -> Dict[str, Any]:
         """
         General satellite data search for scientist queries.
         Maps satellite names (INSAT-3D, INSAT-3DR, Scatsat) to dataset IDs.

@@ -1,7 +1,7 @@
 """
 Scientist API Routes — dataset analysis, simulations, and model management
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -13,12 +13,14 @@ import io
 import json
 import logging
 import numpy as np
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from database import (
     get_db,
     Alert,
     CommunityReport,
+    User,
+    MOSDACMetadata,
     EarthquakeDataset,
     FloodDataset,
     HeatwaveDataset,
@@ -27,10 +29,67 @@ from database import (
     AQIDataset,
     SourceIngestionLog,
 )
+from firebase_auth import verify_firebase_token
 
 logger = logging.getLogger(__name__)
 
-scientist_router = APIRouter(prefix="/api/scientist", tags=["Scientist"])
+_DEVELOPER_ROLES = {"developer"}
+
+
+def _developer_role_from_token(token: dict) -> str:
+    claims = token.get("firebase_claims") or {}
+    role = claims.get("role") or claims.get("user_type") or token.get("role") or ""
+    return str(role).strip().lower()
+
+
+async def require_developer_access(
+    token: dict = Depends(verify_firebase_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Restrict scientist dataset operations to developer users only."""
+    token_role = _developer_role_from_token(token)
+    if token_role in _DEVELOPER_ROLES:
+        return token
+
+    uid = token.get("uid")
+    if uid:
+        db_user = await db.get(User, uid)
+        db_role = (db_user.user_type or "").strip().lower() if db_user else ""
+        if db_user and db_user.is_active and db_role in _DEVELOPER_ROLES:
+            return token
+
+    raise HTTPException(status_code=403, detail="Developer access required")
+
+
+scientist_router = APIRouter(
+    prefix="/api/scientist",
+    tags=["Scientist"],
+    dependencies=[Depends(require_developer_access)],
+)
+
+DATASET_MODEL_MAP = {
+    "earthquake": EarthquakeDataset,
+    "flood": FloodDataset,
+    "heatwave": HeatwaveDataset,
+    "nearby": NearbyDisasterDataset,
+    "weather": WeatherDataset,
+    "aqi": AQIDataset,
+    "ingestion": SourceIngestionLog,
+    "mosdac": MOSDACMetadata,
+}
+
+DATASET_LABEL_MAP = {
+    "earthquake": "Earthquake Events",
+    "flood": "Flood Events",
+    "heatwave": "Heatwave Events",
+    "nearby": "Nearby Alerts Snapshot",
+    "weather": "Weather Observations",
+    "aqi": "AQI Observations",
+    "ingestion": "Source Ingestion Logs",
+    "mosdac": "MOSDAC Metadata",
+}
+
+RAW_COLUMNS = ("raw_payload", "raw_metadata", "payload")
 
 # In-memory storage for uploaded datasets and simulation results
 _datasets: dict = {}  # dataset_id -> {metadata, data}
@@ -62,6 +121,46 @@ def _csv_stream(rows, columns):
     for row in rows:
         writer.writerow({c: _serialize_csv_value(getattr(row, c, None)) for c in columns})
     return io.BytesIO(buffer.getvalue().encode("utf-8"))
+
+
+def _dataset_order_column(model):
+    for attr in ("ingested_at", "captured_at", "created_at", "timestamp", "observation_time", "event_time"):
+        if hasattr(model, attr):
+            return getattr(model, attr)
+    return list(model.__table__.columns)[0]
+
+
+def _dataset_columns(model, payload_mode: str):
+    all_columns = [c.name for c in model.__table__.columns]
+    raw_columns = [c for c in RAW_COLUMNS if c in all_columns]
+
+    if payload_mode == "metadata":
+        return [c for c in all_columns if c not in raw_columns], raw_columns
+
+    if payload_mode == "raw":
+        keep_columns = {
+            "id", "external_id", "product_id", "dataset_id", "source",
+            "ingested_at", "captured_at", "created_at", "timestamp", "observation_time", "event_time",
+        }
+        selected = [c for c in all_columns if c in keep_columns or c in raw_columns]
+        return selected or all_columns, raw_columns
+
+    return all_columns, raw_columns
+
+
+def _rows_to_json_records(rows, columns):
+    records = []
+    for row in rows:
+        records.append({c: _serialize_csv_value(getattr(row, c, None)) for c in columns})
+    return records
+
+
+def _extract_mosdac_tile(raw_metadata):
+    if isinstance(raw_metadata, dict):
+        tile = raw_metadata.get("_suraksha_tile")
+        if isinstance(tile, str) and tile.strip():
+            return tile.strip()
+    return None
 
 
 @scientist_router.post("/upload-dataset")
@@ -352,43 +451,103 @@ async def list_datasets():
     }
 
 
-@scientist_router.get("/datasets/export/{dataset_type}")
-async def export_training_dataset_csv(
-    dataset_type: str,
-    limit: int = 50000,
-    include_raw: bool = False,
+@scientist_router.get("/datasets/catalog")
+async def get_dataset_catalog(
+    include_samples: bool = True,
     db: AsyncSession = Depends(get_db),
 ):
-    """Export stored training datasets as CSV."""
-    ds = dataset_type.strip().lower()
-    model_map = {
-        "earthquake": EarthquakeDataset,
-        "flood": FloodDataset,
-        "heatwave": HeatwaveDataset,
-        "nearby": NearbyDisasterDataset,
-        "weather": WeatherDataset,
-        "aqi": AQIDataset,
-        "ingestion": SourceIngestionLog,
+    """Return full downloadable dataset list with schema and sample raw keys."""
+    datasets = []
+
+    for dataset_id, model in DATASET_MODEL_MAP.items():
+        rows_count = int((await db.execute(select(func.count()).select_from(model))).scalar() or 0)
+        all_columns = [c.name for c in model.__table__.columns]
+        metadata_columns, raw_columns = _dataset_columns(model, payload_mode="metadata")
+
+        sample_raw_keys = []
+        if include_samples and raw_columns:
+            order_col = _dataset_order_column(model)
+            latest_row = (await db.execute(select(model).order_by(order_col.desc()).limit(1))).scalars().first()
+            if latest_row:
+                for raw_col in raw_columns:
+                    raw_value = getattr(latest_row, raw_col, None)
+                    if isinstance(raw_value, dict):
+                        sample_raw_keys = sorted(raw_value.keys())[:80]
+                        break
+
+        datasets.append({
+            "id": dataset_id,
+            "label": DATASET_LABEL_MAP.get(dataset_id, dataset_id.title()),
+            "rows": rows_count,
+            "columns": all_columns,
+            "metadata_columns": metadata_columns,
+            "raw_columns": raw_columns,
+            "sample_raw_keys": sample_raw_keys,
+        })
+
+    return {
+        "datasets": datasets,
+        "formats": ["csv", "json"],
+        "payload_modes": ["metadata", "raw", "both"],
+        "default_payload_mode": "metadata",
     }
 
-    if ds not in model_map:
-        raise HTTPException(status_code=400, detail="dataset_type must be one of: earthquake, flood, heatwave, nearby, weather, aqi, ingestion")
 
-    model = model_map[ds]
-    result = await db.execute(select(model).order_by(model.ingested_at.desc() if hasattr(model, "ingested_at") else model.captured_at.desc()).limit(max(1, min(limit, 200000))))
+@scientist_router.get("/datasets/export/{dataset_type}")
+async def export_training_dataset(
+    dataset_type: str,
+    limit: int = 50000,
+    format: str = Query(default="csv"),
+    payload_mode: str = Query(default="metadata"),
+    include_raw: Optional[bool] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export stored training datasets as CSV or JSON with metadata/raw/both modes."""
+    ds = dataset_type.strip().lower()
+    export_format = format.strip().lower()
+    mode = payload_mode.strip().lower()
+
+    # Backward compatibility: old callers can still send include_raw=true.
+    if include_raw is True and mode == "metadata":
+        mode = "both"
+    elif include_raw is False and mode == "both":
+        mode = "metadata"
+
+    if export_format not in {"csv", "json"}:
+        raise HTTPException(status_code=400, detail="format must be one of: csv, json")
+    if mode not in {"metadata", "raw", "both"}:
+        raise HTTPException(status_code=400, detail="payload_mode must be one of: metadata, raw, both")
+    if ds not in DATASET_MODEL_MAP:
+        raise HTTPException(status_code=400, detail="dataset_type must be one of: earthquake, flood, heatwave, nearby, weather, aqi, ingestion, mosdac")
+
+    model = DATASET_MODEL_MAP[ds]
+    order_col = _dataset_order_column(model)
+    result = await db.execute(
+        select(model)
+        .order_by(order_col.desc())
+        .limit(max(1, min(limit, 200000)))
+    )
     rows = result.scalars().all()
+    columns, _raw_columns = _dataset_columns(model, mode)
 
-    if not rows:
-        raise HTTPException(status_code=404, detail=f"No rows found for dataset '{ds}'")
-
-    columns = [c.name for c in model.__table__.columns]
-    if not include_raw and "raw_payload" in columns:
-        columns.remove("raw_payload")
-
-    filename = f"{ds}_dataset_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
-    stream = _csv_stream(rows, columns)
+    filename = f"{ds}_{mode}_dataset_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{export_format}"
     headers = {"Content-Disposition": f"attachment; filename={filename}"}
-    return StreamingResponse(stream, media_type="text/csv", headers=headers)
+
+    if export_format == "csv":
+        stream = _csv_stream(rows, columns)
+        return StreamingResponse(stream, media_type="text/csv", headers=headers)
+
+    payload = {
+        "dataset": ds,
+        "label": DATASET_LABEL_MAP.get(ds, ds.title()),
+        "payload_mode": mode,
+        "rows": len(rows),
+        "columns": columns,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "data": _rows_to_json_records(rows, columns),
+    }
+    stream = io.BytesIO(json.dumps(payload, ensure_ascii=True).encode("utf-8"))
+    return StreamingResponse(stream, media_type="application/json", headers=headers)
 
 
 @scientist_router.get("/analytics/overview")
@@ -400,6 +559,7 @@ async def analytics_overview(db: AsyncSession = Depends(get_db)):
     nearby_count = int((await db.execute(select(func.count()).select_from(NearbyDisasterDataset))).scalar() or 0)
     weather_count = int((await db.execute(select(func.count()).select_from(WeatherDataset))).scalar() or 0)
     aqi_count = int((await db.execute(select(func.count()).select_from(AQIDataset))).scalar() or 0)
+    mosdac_count = int((await db.execute(select(func.count()).select_from(MOSDACMetadata))).scalar() or 0)
 
     ingest_rows = (await db.execute(
         select(SourceIngestionLog).order_by(SourceIngestionLog.ingested_at.desc()).limit(5000)
@@ -436,7 +596,8 @@ async def analytics_overview(db: AsyncSession = Depends(get_db)):
             "nearby": nearby_count,
             "weather": weather_count,
             "aqi": aqi_count,
-            "total": eq_count + flood_count + heat_count + nearby_count + weather_count + aqi_count,
+            "mosdac": mosdac_count,
+            "total": eq_count + flood_count + heat_count + nearby_count + weather_count + aqi_count + mosdac_count,
         },
         "quality": {
             "average_quality_score": avg_quality,
@@ -448,6 +609,108 @@ async def analytics_overview(db: AsyncSession = Depends(get_db)):
         "top_sources": top_sources,
         "daily_ingestion": daily_ingestion,
     }
+
+
+@scientist_router.get("/datasets/coverage/mosdac")
+async def mosdac_coverage_report(
+    window_hours: int = Query(default=24, ge=1, le=24 * 30),
+    db: AsyncSession = Depends(get_db),
+):
+    """Coverage summary for MOSDAC metadata storage and India tile completeness."""
+    from ingest.mosdac_poller import mosdac_poller, MONITORED_DATASETS
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+    totals_rows = (await db.execute(
+        select(
+            MOSDACMetadata.dataset_id,
+            func.count(MOSDACMetadata.id).label("rows"),
+            func.max(MOSDACMetadata.timestamp).label("last_seen"),
+        )
+        .group_by(MOSDACMetadata.dataset_id)
+    )).all()
+    totals_by_dataset = {r.dataset_id: int(r.rows or 0) for r in totals_rows}
+    last_seen_by_dataset = {
+        r.dataset_id: (r.last_seen.isoformat() if r.last_seen else None)
+        for r in totals_rows
+    }
+
+    recent_counts_rows = (await db.execute(
+        select(
+            MOSDACMetadata.dataset_id,
+            func.count(MOSDACMetadata.id).label("rows_recent"),
+        )
+        .where(MOSDACMetadata.timestamp.is_not(None), MOSDACMetadata.timestamp >= cutoff)
+        .group_by(MOSDACMetadata.dataset_id)
+    )).all()
+    recent_counts = {r.dataset_id: int(r.rows_recent or 0) for r in recent_counts_rows}
+
+    recent_tile_rows = (await db.execute(
+        select(MOSDACMetadata.dataset_id, MOSDACMetadata.raw_metadata)
+        .where(MOSDACMetadata.timestamp.is_not(None), MOSDACMetadata.timestamp >= cutoff)
+        .limit(250000)
+    )).all()
+
+    tiles_by_dataset = {}
+    for ds, raw in recent_tile_rows:
+        tile_id = _extract_mosdac_tile(raw)
+        if not tile_id:
+            continue
+        tiles_by_dataset.setdefault(ds, set()).add(tile_id)
+
+    expected_tiles = len(mosdac_poller.india_tiles)
+    overall_tiles = set()
+    datasets = []
+    for ds in MONITORED_DATASETS.keys():
+        dataset_tiles = tiles_by_dataset.get(ds, set())
+        overall_tiles.update(dataset_tiles)
+        tile_coverage_pct = round((len(dataset_tiles) / expected_tiles) * 100, 2) if expected_tiles else 0.0
+        datasets.append({
+            "dataset_id": ds,
+            "label": MONITORED_DATASETS[ds].get("name", ds),
+            "rows_total": totals_by_dataset.get(ds, 0),
+            "rows_in_window": recent_counts.get(ds, 0),
+            "last_seen": last_seen_by_dataset.get(ds),
+            "tiles_hit_in_window": len(dataset_tiles),
+            "expected_tiles": expected_tiles,
+            "tile_coverage_percent": tile_coverage_pct,
+            "is_full_india_like": tile_coverage_pct >= 90.0,
+        })
+
+    overall_tile_coverage_pct = round((len(overall_tiles) / expected_tiles) * 100, 2) if expected_tiles else 0.0
+    config = mosdac_poller.scan_config()
+
+    return {
+        "window_hours": window_hours,
+        "coverage_generated_at": datetime.now(timezone.utc).isoformat(),
+        "scan_config": config,
+        "datasets": datasets,
+        "overall": {
+            "total_mosdac_rows": int(sum(totals_by_dataset.values())),
+            "rows_in_window": int(sum(recent_counts.values())),
+            "overall_tiles_hit_in_window": len(overall_tiles),
+            "expected_tiles": expected_tiles,
+            "overall_tile_coverage_percent": overall_tile_coverage_pct,
+            "is_full_india_guaranteed": False,
+            "note": "Coverage can be high, but full-India completeness is not guaranteed because source availability and API limits vary by dataset/time.",
+        },
+    }
+
+
+@scientist_router.post("/datasets/coverage/mosdac/backfill")
+async def trigger_mosdac_backfill(
+    days_back: int = Query(default=7, ge=1, le=30),
+    limit_per_tile: int = Query(default=80, ge=5, le=300),
+):
+    """Run a full-India tiled MOSDAC metadata backfill and store results."""
+    from ingest.mosdac_poller import mosdac_poller
+
+    summary = await mosdac_poller.backfill_metadata(
+        days_back=days_back,
+        limit_per_tile=limit_per_tile,
+    )
+    summary["scan_config"] = mosdac_poller.scan_config()
+    return summary
 
 
 @scientist_router.get("/simulations")

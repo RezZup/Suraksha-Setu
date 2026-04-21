@@ -142,7 +142,11 @@ async def _persist_weather_dataset(
     try:
         from database import AsyncSessionLocal, WeatherDataset
 
-        current = weather_payload.get("current", {})
+        normalized = weather_payload.get("normalized") if isinstance(weather_payload, dict) else None
+        if not isinstance(normalized, dict):
+            normalized = weather_payload
+
+        current = normalized.get("current", {}) if isinstance(normalized, dict) else {}
         obs_time = datetime.now(timezone.utc)
         async with AsyncSessionLocal() as db:
             db.add(WeatherDataset(
@@ -179,6 +183,10 @@ async def _persist_aqi_dataset(
     try:
         from database import AsyncSessionLocal, AQIDataset
 
+        normalized = aqi_payload.get("normalized") if isinstance(aqi_payload, dict) else None
+        if not isinstance(normalized, dict):
+            normalized = aqi_payload
+
         obs_time = datetime.now(timezone.utc)
         async with AsyncSessionLocal() as db:
             db.add(AQIDataset(
@@ -188,15 +196,15 @@ async def _persist_aqi_dataset(
                 lat=lat,
                 lon=lon,
                 observation_time=obs_time,
-                aqi=aqi_payload.get("aqi"),
-                aqi_index=aqi_payload.get("aqi_index"),
-                aqi_label=aqi_payload.get("aqi_label"),
-                pm25=aqi_payload.get("pm25"),
-                pm10=aqi_payload.get("pm10"),
-                no2=aqi_payload.get("no2"),
-                o3=aqi_payload.get("o3"),
-                so2=aqi_payload.get("so2"),
-                co=aqi_payload.get("co"),
+                aqi=normalized.get("aqi") if isinstance(normalized, dict) else None,
+                aqi_index=normalized.get("aqi_index") if isinstance(normalized, dict) else None,
+                aqi_label=normalized.get("aqi_label") if isinstance(normalized, dict) else None,
+                pm25=normalized.get("pm25") if isinstance(normalized, dict) else None,
+                pm10=normalized.get("pm10") if isinstance(normalized, dict) else None,
+                no2=normalized.get("no2") if isinstance(normalized, dict) else None,
+                o3=normalized.get("o3") if isinstance(normalized, dict) else None,
+                so2=normalized.get("so2") if isinstance(normalized, dict) else None,
+                co=normalized.get("co") if isinstance(normalized, dict) else None,
                 quality_score=quality_score,
                 quality_status=_quality_status(quality_score),
                 raw_payload=aqi_payload,
@@ -449,7 +457,11 @@ async def _fetch_weather(lat: float, lon: float, city: Optional[str] = None) -> 
         lat=lat,
         lon=lon,
         city=city,
-        weather_payload=result,
+        weather_payload={
+            "normalized": result,
+            "source_raw": raw,
+            "source": "open-meteo",
+        },
         quality_score=quality_score,
     )
     await _log_source_ingestion(
@@ -487,7 +499,18 @@ async def _fetch_aqi(lat: float, lon: float, city: Optional[str] = None) -> Opti
     if not OWM_API_KEY or OWM_API_KEY.startswith("mock"):
         mock = _mock_aqi(lat, lon)
         score = _aqi_quality_score(mock)
-        await _persist_aqi_dataset("openweather-mock", lat, lon, city, mock, score)
+        await _persist_aqi_dataset(
+            "openweather-mock",
+            lat,
+            lon,
+            city,
+            {
+                "normalized": mock,
+                "source_raw": mock,
+                "source": "openweather-mock",
+            },
+            score,
+        )
         await _log_source_ingestion(
             source="openweather-mock",
             dataset_type="aqi",
@@ -561,11 +584,22 @@ async def _fetch_aqi(lat: float, lon: float, city: Optional[str] = None) -> Opti
                 }
                 score = _aqi_quality_score(result)
 
-        await _persist_aqi_dataset("openweather", lat, lon, city, result, score)
+        await _persist_aqi_dataset(
+            "openweather",
+            lat,
+            lon,
+            city,
+            {
+                "normalized": result,
+                "source_raw": data,
+                "source": "openweather",
+            },
+            score,
+        )
         await _log_source_ingestion(
             source="openweather",
             dataset_type="aqi",
-            payload=result,
+            payload=data,
             quality_score=score,
             is_usable=score >= 0.65,
             retry_count=1 if score < 0.65 else 0,
@@ -581,7 +615,18 @@ async def _fetch_aqi(lat: float, lon: float, city: Optional[str] = None) -> Opti
         logger.error(f"AQI fetch error: {e}")
         fallback = _mock_aqi(lat, lon)
         score = _aqi_quality_score(fallback)
-        await _persist_aqi_dataset("openweather-fallback", lat, lon, city, fallback, score)
+        await _persist_aqi_dataset(
+            "openweather-fallback",
+            lat,
+            lon,
+            city,
+            {
+                "normalized": fallback,
+                "source_raw": {"error": str(e)},
+                "source": "openweather-fallback",
+            },
+            score,
+        )
         await _log_source_ingestion(
             source="openweather",
             dataset_type="aqi",

@@ -237,6 +237,7 @@ async def _fetch_usgs_earthquakes() -> list:
                 "magnitude": mag,
                 "depth_km": round(geo[2] or 0, 1),
                 "source": "USGS",
+                "source_raw": feat,
             })
         logger.info("Fetched %d earthquakes from USGS", len(results))
         return results
@@ -292,6 +293,7 @@ async def _fetch_gdacs_disasters() -> list:
                 "damage": None,
                 "description": props.get("description") or props.get("htmldescription") or "",
                 "source": "GDACS",
+                "source_raw": feat,
             })
         logger.info("Fetched %d events from GDACS", len(results))
         return results
