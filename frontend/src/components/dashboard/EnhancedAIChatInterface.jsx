@@ -12,9 +12,12 @@ import { Badge } from '@/components/ui/badge';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import axios from 'axios';
+import { useLocation as useAppLocation } from '@/contexts/LocationContext';
+import { readTimedCache } from '@/utils/locationCache';
 
 const API_URL = (process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000') + '/api';
 const DASHBOARD_CHAT_STORAGE_KEY = 'suraksha_dashboard_ai_chat_v1';
+const WEATHER_BOOTSTRAP_CACHE_KEY = 'weather_dashboard_bootstrap_v1';
 const DASHBOARD_WELCOME_MESSAGE = {
   id: 1,
   type: 'bot',
@@ -52,6 +55,7 @@ const normalizeMessageText = (value, fallback = '') => {
 };
 
 const EnhancedAIChatInterface = () => {
+  const { location: appLocation, alerts: appAlerts, gpsPincode, homePincode } = useAppLocation();
   const [messages, setMessages] = useState(() => {
     try {
       const saved = localStorage.getItem(DASHBOARD_CHAT_STORAGE_KEY);
@@ -82,6 +86,51 @@ const EnhancedAIChatInterface = () => {
   const scrollAreaRef = useRef(null);
   const inputRef = useRef(null);
   const recognitionRef = useRef(null);
+
+  const buildContextPayload = (detectedLang) => {
+    const lat = Number(appLocation?.latitude ?? appLocation?.lat);
+    const lon = Number(appLocation?.longitude ?? appLocation?.lon);
+    const city = appLocation?.city || null;
+    const state = appLocation?.state || null;
+    const pinCode = appLocation?.gps_pincode || appLocation?.pin_code || gpsPincode || homePincode || null;
+
+    const weatherCache = readTimedCache(WEATHER_BOOTSTRAP_CACHE_KEY);
+    const weather = weatherCache?.weather || null;
+    const aqi = weatherCache?.aqi || null;
+
+    const alertSnapshot = Array.isArray(appAlerts)
+      ? appAlerts.slice(0, 5).map((a) => ({
+          id: a?.id,
+          title: a?.title || a?.message || a?.description || 'Alert',
+          severity: a?.severity || 'unknown',
+          alert_type: a?.alert_type || a?.type || a?.report_type || 'general',
+          location: a?.location || a?.location_data?.city || city || 'nearby',
+        }))
+      : [];
+
+    return {
+      domain: 'dashboard',
+      language: detectedLang,
+      locale: detectedLang,
+      force_primary_llm: true,
+      location: {
+        city,
+        state,
+        pin_code: pinCode,
+        lat: Number.isFinite(lat) ? lat : null,
+        lon: Number.isFinite(lon) ? lon : null,
+      },
+      nearby_alerts: alertSnapshot,
+      weather_snapshot: {
+        condition: weather?.current?.condition || weather?.current?.weather || weather?.condition || null,
+        temperature_c: weather?.current?.temperature || weather?.current?.temp || weather?.temperature || null,
+        humidity: weather?.current?.humidity || weather?.humidity || null,
+        wind_kph: weather?.current?.wind_speed || weather?.current?.wind_kph || weather?.wind_speed || null,
+        aqi: aqi?.current?.aqi || aqi?.aqi || null,
+      },
+      data_timestamp: new Date().toISOString(),
+    };
+  };
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -165,7 +214,7 @@ const EnhancedAIChatInterface = () => {
         role: 'citizen',
         language: detectedLang,
         locale: detectedLang,
-        context: { domain: 'dashboard', language: detectedLang, locale: detectedLang },
+        context: buildContextPayload(detectedLang),
       });
 
       const botText = normalizeMessageText(
@@ -381,7 +430,10 @@ const EnhancedAIChatInterface = () => {
             role: 'citizen',
             language: detectedLang,
             locale: detectedLang,
-            context: { domain: 'dashboard', language: detectedLang, locale: detectedLang, source: 'voice-fallback' },
+            context: {
+              ...buildContextPayload(detectedLang),
+              source: 'voice-fallback',
+            },
           }, { timeout: 25000 });
 
           setMessages((prev) =>

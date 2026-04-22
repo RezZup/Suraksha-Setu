@@ -65,7 +65,53 @@ class CitizenAgent(BaseAgent):
                 base += f"\n\n[OFFICIAL ACTIONS — relay these first]:\n{playbook_actions}"
             location = context.get("location")
             if location:
-                base += f"\nUser location: {location}"
+                if isinstance(location, dict):
+                    city = location.get("city")
+                    state = location.get("state")
+                    pin_code = location.get("pin_code")
+                    lat = location.get("lat")
+                    lon = location.get("lon")
+                    base += (
+                        "\n[USER LOCATION CONTEXT]"
+                        f"\n- City: {city or 'unknown'}"
+                        f"\n- State: {state or 'unknown'}"
+                        f"\n- PIN: {pin_code or 'unknown'}"
+                        f"\n- Latitude: {lat if lat is not None else 'unknown'}"
+                        f"\n- Longitude: {lon if lon is not None else 'unknown'}"
+                    )
+                else:
+                    base += f"\nUser location: {location}"
+
+            weather_snapshot = context.get("weather_snapshot")
+            if isinstance(weather_snapshot, dict):
+                base += (
+                    "\n[WEATHER SNAPSHOT]"
+                    f"\n- Condition: {weather_snapshot.get('condition') or 'unknown'}"
+                    f"\n- Temperature C: {weather_snapshot.get('temperature_c') if weather_snapshot.get('temperature_c') is not None else 'unknown'}"
+                    f"\n- AQI: {weather_snapshot.get('aqi') if weather_snapshot.get('aqi') is not None else 'unknown'}"
+                    f"\n- Humidity: {weather_snapshot.get('humidity') if weather_snapshot.get('humidity') is not None else 'unknown'}"
+                    f"\n- Wind kph: {weather_snapshot.get('wind_kph') if weather_snapshot.get('wind_kph') is not None else 'unknown'}"
+                )
+
+            nearby_alerts = context.get("nearby_alerts")
+            if isinstance(nearby_alerts, list) and nearby_alerts:
+                base += "\n[NEARBY ALERT SNAPSHOT]"
+                for item in nearby_alerts[:5]:
+                    if not isinstance(item, dict):
+                        continue
+                    base += (
+                        f"\n- {item.get('title') or 'Alert'}"
+                        f" | severity={item.get('severity') or 'unknown'}"
+                        f" | type={item.get('alert_type') or 'general'}"
+                        f" | location={item.get('location') or 'nearby'}"
+                    )
+
+            base += (
+                "\n\nCONTEXT USAGE RULES:"
+                "\n- Treat the provided location/weather/alerts snapshot as current app context."
+                "\n- Do not ask user for location again if city/state/pin or coordinates are already present."
+                "\n- Prefer answering directly from this snapshot plus your safety knowledge."
+            )
         return base
 
 

@@ -35,6 +35,7 @@ import {
 } from '@/services/weatherApi';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import axios from 'axios';
+import { useLocation as useAppLocation } from '@/contexts/LocationContext';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 const ALERT_GEOCODE_BATCH_SIZE = 6;
@@ -142,6 +143,12 @@ const haversineKm = (lat1, lon1, lat2, lon2) => {
 };
 
 const MapView = () => {
+  const {
+    location: appLocation,
+    gpsPincode,
+    homePincode,
+    detectLocation: detectAppLocation,
+  } = useAppLocation();
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [center, setCenter] = useState([20.5937, 78.9629]); // India center
@@ -165,6 +172,8 @@ const MapView = () => {
   const [unmappedAlertsCount, setUnmappedAlertsCount] = useState(0);
   const [error, setError] = useState(null);
   const geocodeCacheRef = useRef(new Map());
+  const didBootstrapLocationRef = useRef(false);
+  const defaultLoadStartedRef = useRef(false);
 
   const [showLayers, setShowLayers] = useState({
     aqi: true,
@@ -261,7 +270,6 @@ const MapView = () => {
       }
     };
 
-    loadLocationData(center[0], center[1]);
     fetchAlerts();
     fetchAllDisasterPoints();
 
@@ -269,6 +277,70 @@ const MapView = () => {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const bootstrapFromCurrentLocation = async () => {
+      if (didBootstrapLocationRef.current) return;
+
+      const lat = Number(appLocation?.latitude ?? appLocation?.lat);
+      const lon = Number(appLocation?.longitude ?? appLocation?.lon);
+      const preferredPincode = String(
+        gpsPincode ||
+        appLocation?.gps_pincode ||
+        homePincode ||
+        appLocation?.pin_code ||
+        ''
+      ).trim();
+
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        if (cancelled) return;
+        didBootstrapLocationRef.current = true;
+        setCenter([lat, lon]);
+        setSearchRadius(radiusKm * 1000);
+        setLocationLabel(preferredPincode ? `PIN ${preferredPincode}` : (appLocation?.city || 'My Location'));
+        if (preferredPincode) setSearchQuery(preferredPincode);
+        await loadLocationData(lat, lon);
+        return;
+      }
+
+      if (preferredPincode) {
+        if (cancelled) return;
+        setSearchQuery(preferredPincode);
+        try {
+          const geoRes = await axios.post(`${API_URL}/api/location/search`, { query: preferredPincode });
+          const geoData = geoRes.data;
+          if (geoData?.success && geoData?.lat && geoData?.lon) {
+            if (cancelled) return;
+            didBootstrapLocationRef.current = true;
+            setCenter([geoData.lat, geoData.lon]);
+            setSearchRadius(radiusKm * 1000);
+            setLocationLabel(`PIN ${preferredPincode}`);
+            await loadLocationData(geoData.lat, geoData.lon);
+            return;
+          }
+        } catch {
+          // Fall back to default center when PIN geocode fails.
+        }
+      }
+
+      if (!defaultLoadStartedRef.current) {
+        defaultLoadStartedRef.current = true;
+        await loadLocationData(center[0], center[1]);
+      }
+
+      if (!appLocation) {
+        detectAppLocation({ background: true });
+      }
+    };
+
+    bootstrapFromCurrentLocation();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [appLocation, gpsPincode, homePincode, radiusKm, detectAppLocation]);
 
   useEffect(() => {
     let isStale = false;

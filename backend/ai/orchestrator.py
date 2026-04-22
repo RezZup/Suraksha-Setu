@@ -64,6 +64,10 @@ def _sanitize_content(text: str) -> str:
     if not text:
         return ""
     cleaned = text
+    # Strip raw URLs to discourage link-only answers.
+    cleaned = re.sub(r"https?://\S+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"www\.\S+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[\w\-./?%&=]*)?\b", "", cleaned, flags=re.IGNORECASE)
     # Strip a dangling leading think tag if provider omits closing tag.
     if cleaned.lstrip().startswith("<think>") and "</think>" not in cleaned:
         first_newline = cleaned.find("\n")
@@ -108,6 +112,36 @@ def _sanitize_content(text: str) -> str:
     )
     cleaned = re.sub(
         r"\s*(?:for\s+real[- ]?time\s+alerts,?\s*)?(?:please\s+)?check\s+imd(?:['’]s)?\s+(?:website|site)(?:\s+or\s+(?:their|the)\s+app)?\.?\s*",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*(?:please\s+)?(?:visit|check|see|refer\s+to)\s+(?:the\s+)?(?:official\s+)?(?:website|site|app|portal)\s*(?:for\s+more\s+info|for\s+details)?\.?\s*",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*(?:you\s+can\s+)?(?:google\s+it|search\s+online)\.?\s*",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*(?:track|follow|monitor)\s+(?:updates?|alerts?)\s+from\s+(?:imd|ndma|sdma|local\s+authorit(?:y|ies))\.?\s*",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*(?:you\s+can\s+)?(?:contact|call|reach\s+out\s+to)\s+(?:ndma\s+helpline\s*1078|local\s+authorit(?:y|ies))\.?\s*",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s*(?:safe\s+rahne\s+ke\s+liye\s+)?(?:ndma|imd|sdma)(?:\s+ki|\s+ke)?\s+(?:website|site|portal|updates?|update)\s+\S*\s*(?:check|dekh(?:en|o)|follow|track)\s*",
         " ",
         cleaned,
         flags=re.IGNORECASE,
@@ -334,6 +368,9 @@ class AIOrchestrator:
             "- Return only the final user-facing answer.\n"
             "- Never include internal reasoning, planning, or meta text (example: 'the user is asking...').\n"
             "- Do not include source/citation text unless the user explicitly asks for sources.\n"
+            "- Do not mention departments/agencies/helplines unless the user asks for source or contact details.\n"
+            "- Provide a complete direct answer in-chat.\n"
+            "- Do not tell users to visit websites/apps/links instead of answering.\n"
             "- Do not use Markdown. Return plain text only."
         )
 

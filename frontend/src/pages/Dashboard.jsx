@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import EnhancedAIChatInterface from '@/components/dashboard/EnhancedAIChatInterface';
 import SurakshaScore from '@/components/dashboard/SurakshaScore';
 import ActiveAlerts from '@/components/dashboard/ActiveAlerts';
@@ -8,6 +8,7 @@ import LiveAQIChart from '@/components/dashboard/LiveAQIChart';
 import LocationSelector from '@/components/location/LocationSelector';
 import NotificationSettings from '@/components/notifications/NotificationSettings';
 import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Download, Share2, RefreshCw, TrendingUp, ShieldCheck, BellRing, Clock3 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
@@ -17,6 +18,12 @@ const Dashboard = () => {
   const score = 82;
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState(new Date());
+  const [pageBooting, setPageBooting] = useState(true);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setPageBooting(false), 650);
+    return () => clearTimeout(timer);
+  }, []);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -25,6 +32,27 @@ const Dashboard = () => {
       setIsRefreshing(false);
     }, 900);
   };
+
+  if (pageBooting) {
+    return (
+      <div className="space-y-5 max-w-[1600px] mx-auto px-2 md:px-4 pb-6">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Skeleton className="h-20 rounded-xl" />
+          <Skeleton className="h-20 rounded-xl" />
+          <Skeleton className="h-20 rounded-xl" />
+          <Skeleton className="h-20 rounded-xl" />
+        </div>
+        <div className="grid grid-cols-1 2xl:grid-cols-12 gap-5">
+          <Skeleton className="2xl:col-span-8 h-[420px] rounded-2xl" />
+          <div className="2xl:col-span-4 space-y-5">
+            <Skeleton className="h-40 rounded-2xl" />
+            <Skeleton className="h-64 rounded-2xl" />
+            <Skeleton className="h-56 rounded-2xl" />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5 max-w-[1600px] mx-auto px-2 md:px-4 pb-6">

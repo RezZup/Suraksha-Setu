@@ -17,7 +17,7 @@ import time
 import logging
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, Tuple
 
 import httpx
@@ -359,15 +359,51 @@ async def _fetch_weather(lat: float, lon: float, city: Optional[str] = None) -> 
 
     raw = None
     retry_count = 0
+    last_error = None
     for attempt in range(2):
         retry_count = attempt
-        resp = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
-        resp.raise_for_status()
-        raw = resp.json()
-        if raw and raw.get("current"):
-            break
+        try:
+            resp = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
+            resp.raise_for_status()
+            raw = resp.json()
+            if raw and raw.get("current"):
+                break
+        except Exception as e:
+            last_error = e
+            raw = None
+            if attempt == 0:
+                await asyncio.sleep(0.25)
+
     if not isinstance(raw, dict):
-        raise HTTPException(status_code=502, detail="Weather source returned invalid payload")
+        logger.error("Weather source fetch error for (%s,%s): %s", lat, lon, last_error)
+        fallback = _mock_weather(lat, lon, city=city)
+        score = _weather_quality_score(fallback)
+        await _persist_weather_dataset(
+            source="open-meteo-fallback",
+            lat=lat,
+            lon=lon,
+            city=city,
+            weather_payload={
+                "normalized": fallback,
+                "source_raw": {"error": str(last_error) if last_error else "unknown"},
+                "source": "open-meteo-fallback",
+            },
+            quality_score=score,
+        )
+        await _log_source_ingestion(
+            source="open-meteo",
+            dataset_type="weather",
+            payload={"error": str(last_error) if last_error else "unknown"},
+            quality_score=0.0,
+            is_usable=False,
+            retry_count=retry_count,
+            lat=lat,
+            lon=lon,
+            city=city,
+            reason=str(last_error) if last_error else "weather source unavailable",
+        )
+        _cache_set(cache_key, fallback, WEATHER_CACHE_TTL)
+        return fallback
 
     c = raw.get("current", {})
 
@@ -711,6 +747,66 @@ def _mock_aqi(lat: float, lon: float) -> Dict:
         "so2": round(5 + random.uniform(0, 10), 1),
         "co": round(300 + random.uniform(0, 200), 1),
         "_mock": True,
+    }
+
+
+def _mock_weather(lat: float, lon: float, city: Optional[str] = None) -> Dict:
+    """Generate safe mock weather data when upstream weather provider is unavailable."""
+    seed_val = abs(int((lat * 1000) + (lon * 1000)))
+    base_temp = 22 + (seed_val % 15)
+    now = datetime.now(timezone.utc)
+
+    hourly = []
+    for i in range(24):
+        ts = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=i)
+        temp = base_temp + ((i % 6) - 3)
+        hourly.append({
+            "time": ts.isoformat(),
+            "temp": temp,
+            "rain": 0,
+            "rain_prob": 10 if i % 7 == 0 else 0,
+            "humidity": min(92, 50 + (i % 10) * 3),
+            "weather_code": 1,
+        })
+
+    daily = []
+    for d in range(7):
+        day = now + timedelta(days=d)
+        high = base_temp + 4 + (d % 2)
+        low = base_temp - 3 - (d % 2)
+        daily.append({
+            "date": day.strftime("%Y-%m-%d"),
+            "high": high,
+            "low": low,
+            "condition": "Partly Cloudy",
+            "weather_code": 2,
+            "sunrise": day.replace(hour=6, minute=0, second=0, microsecond=0).isoformat(),
+            "sunset": day.replace(hour=18, minute=30, second=0, microsecond=0).isoformat(),
+            "uv_index": 6,
+            "rain_sum": 0,
+            "wind_max": 18,
+        })
+
+    return {
+        "current": {
+            "temperature": base_temp,
+            "humidity": 62,
+            "apparent_temperature": base_temp + 1,
+            "feels_like": base_temp + 1,
+            "wind_speed": 12,
+            "wind_direction": 180,
+            "pressure": 1012,
+            "condition": "Partly Cloudy",
+            "weather_code": 2,
+            "rain": 0,
+            "is_day": 1,
+            "is_severe": False,
+        },
+        "hourly": hourly,
+        "daily": daily,
+        "_mock": True,
+        "_fallback_reason": "upstream weather provider unavailable",
+        "_city": city,
     }
 
 

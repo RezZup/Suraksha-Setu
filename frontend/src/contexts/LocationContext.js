@@ -2,6 +2,7 @@
 import axios from 'axios';
 import useWebSocket from '@/hooks/useWebSocket';
 import { useAuth } from '@/contexts/AuthContext';
+import { readLocationCache, saveLocationCache, clearLocationCache } from '@/utils/locationCache';
 
 const LocationContext = createContext();
 
@@ -62,15 +63,31 @@ export const LocationProvider = ({ children }) => {
   });
 
   useEffect(() => {
-    const saved = localStorage.getItem('userLocation');
-    if (saved) {
-      try { setLocation(JSON.parse(saved)); } catch {}
+    const cached = readLocationCache();
+    if (cached) {
+      setLocation(cached);
+      localStorage.setItem('userLocation', JSON.stringify(cached));
+    } else {
+      const saved = localStorage.getItem('userLocation');
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          setLocation(parsed);
+          saveLocationCache(parsed);
+        } catch {}
+      }
     }
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    if (!location) detectLocation();
+    if (!location) {
+      detectLocation();
+      return;
+    }
+
+    // Cached location renders immediately, then refresh in background.
+    detectLocation({ background: true });
   }, []); // eslint-disable-line
 
   useEffect(() => {
@@ -138,28 +155,28 @@ export const LocationProvider = ({ children }) => {
     sync();
   }, [user, token, location, gpsPincode, homePincode]);
 
-  const detectLocation = async () => {
-    setLoading(true);
+  const detectLocation = async ({ background = false } = {}) => {
+    if (!background) setLoading(true);
     setError(null);
     try {
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
-          async (pos) => { await updateLocationByCoords(pos.coords.latitude, pos.coords.longitude); },
+          async (pos) => { await updateLocationByCoords(pos.coords.latitude, pos.coords.longitude, { silent: background }); },
           async (geoErr) => {
             console.warn('Geolocation failed, using IP detection:', geoErr.message);
-            await detectLocationByIP();
+            await detectLocationByIP({ silent: background });
           }
         );
       } else {
-        await detectLocationByIP();
+        await detectLocationByIP({ silent: background });
       }
     } catch {
       setError('Failed to detect location');
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   };
 
-  const detectLocationByIP = async () => {
+  const detectLocationByIP = async ({ silent = false } = {}) => {
     try {
       const res = await axios.get(`${BACKEND}/api/location/current`, { timeout: 10000 });
       const ld = {
@@ -169,14 +186,17 @@ export const LocationProvider = ({ children }) => {
       };
       setLocation(ld);
       localStorage.setItem('userLocation', JSON.stringify(ld));
+      saveLocationCache(ld);
       setError(null);
     } catch (err) {
       setError(err.code === 'ECONNABORTED' ? 'Connection timeout.' : 'Unable to detect location automatically.');
-    } finally { setLoading(false); }
+    } finally {
+      if (!silent) setLoading(false);
+    }
   };
 
-  const updateLocationByCoords = async (latitude, longitude) => {
-    setLoading(true);
+  const updateLocationByCoords = async (latitude, longitude, { silent = false } = {}) => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const res = await axios.post(
@@ -188,6 +208,7 @@ export const LocationProvider = ({ children }) => {
         const ld = { ...res.data.location, method: 'gps' };
         setLocation(ld);
         localStorage.setItem('userLocation', JSON.stringify(ld));
+        saveLocationCache(ld);
         setError(null);
         
         // Reverse-geocode for pincode (optional, don't fail if it times out)
@@ -201,11 +222,18 @@ export const LocationProvider = ({ children }) => {
             const pc = rgRes.data.pincode;
             setGpsPincode(pc);
             localStorage.setItem('gps_pincode', pc);
-            setLocation((prev) => prev ? {
-              ...prev, gps_pincode: pc,
-              city: prev.city || rgRes.data.city,
-              state: prev.state || rgRes.data.state,
-            } : prev);
+            setLocation((prev) => {
+              if (!prev) return prev;
+              const next = {
+                ...prev,
+                gps_pincode: pc,
+                city: prev.city || rgRes.data.city,
+                state: prev.state || rgRes.data.state,
+              };
+              localStorage.setItem('userLocation', JSON.stringify(next));
+              saveLocationCache(next);
+              return next;
+            });
           }
         } catch (rgErr) { 
           // Log warning but don't fail - user can still set location via PIN
@@ -214,7 +242,9 @@ export const LocationProvider = ({ children }) => {
       }
     } catch (err) {
       setError(err.code === 'ECONNABORTED' ? 'Connection timeout.' : 'Unable to update location.');
-    } finally { setLoading(false); }
+    } finally {
+      if (!silent) setLoading(false);
+    }
   };
 
   const updateLocationByPincode = async (pinCode) => {
@@ -233,6 +263,7 @@ export const LocationProvider = ({ children }) => {
         const ld = { ...uRes.data.location, method: 'pincode' };
         setLocation(ld);
         localStorage.setItem('userLocation', JSON.stringify(ld));
+        saveLocationCache(ld);
         setHomePincode(pinCode);
         localStorage.setItem('home_pincode', pinCode);
         setError(null);
@@ -289,6 +320,7 @@ export const LocationProvider = ({ children }) => {
   const clearLocation = () => {
     setLocation(null);
     localStorage.removeItem('userLocation');
+    clearLocationCache();
     setAlerts([]);
   };
 

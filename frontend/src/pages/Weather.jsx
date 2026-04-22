@@ -32,10 +32,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line, BarChart, Bar, Legend, ComposedChart } from 'recharts';
 import { getWeatherByLocation, getAQIByLocation } from '@/services/weatherApi';
 import axios from 'axios';
+import { useLocation as useAppLocation } from '@/contexts/LocationContext';
+import { readTimedCache, saveTimedCache } from '@/utils/locationCache';
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+const WEATHER_BOOTSTRAP_CACHE_KEY = 'weather_dashboard_bootstrap_v1';
+const WEATHER_BOOTSTRAP_TTL_MS = 10 * 60 * 1000;
 
 const Weather = () => {
+  const { location: appLocation } = useAppLocation();
   const [loading, setLoading] = useState(true);
   const [location, setLocation] = useState('');
   const [weatherData, setWeatherData] = useState(null);
@@ -43,6 +48,19 @@ const Weather = () => {
   const [aqiHistory, setAQIHistory] = useState(null);
   const [error, setError] = useState(null);
   const [currentLocation, setCurrentLocation] = useState(null);
+
+  const persistWeatherBootstrap = ({ weather, aqi, aqiHistory: history, currentLocationName }) => {
+    saveTimedCache(
+      WEATHER_BOOTSTRAP_CACHE_KEY,
+      {
+        weather,
+        aqi,
+        aqiHistory: history,
+        currentLocationName,
+      },
+      WEATHER_BOOTSTRAP_TTL_MS
+    );
+  };
 
   const parseNumber = (value) => {
     const parsed = Number(value);
@@ -59,13 +77,29 @@ const Weather = () => {
     { name: 'Hyderabad', coords: { lat: 17.3850, lon: 78.4867 }, icon: '💎' },
   ];
 
-  // Load default location on mount using auto-detect
+  // Cache-first startup, then refresh in background using shared app location.
   useEffect(() => {
-    loadAutoDetectWeather();
-  }, []);
+    const cached = readTimedCache(WEATHER_BOOTSTRAP_CACHE_KEY);
+    if (cached?.weather) {
+      setWeatherData(cached.weather);
+      setAQIData(cached.aqi || null);
+      setAQIHistory(cached.aqiHistory || null);
+      setCurrentLocation(cached.currentLocationName || null);
+      setLoading(false);
+    }
 
-  const loadAutoDetectWeather = async () => {
-    setLoading(true);
+    const lat = Number(appLocation?.latitude ?? appLocation?.lat);
+    const lon = Number(appLocation?.longitude ?? appLocation?.lon);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      loadWeatherData({ lat, lon }, { background: true });
+      return;
+    }
+
+    loadAutoDetectWeather({ background: true });
+  }, [appLocation]);
+
+  const loadAutoDetectWeather = async ({ background = false } = {}) => {
+    if (!background) setLoading(true);
     setError(null);
     
     try {
@@ -82,7 +116,8 @@ const Weather = () => {
         completeWeather.ai_insights = response.data.ai_insights;
         
         setWeatherData(completeWeather);
-        setCurrentLocation(response.data.location?.display_name || 'Your Location');
+        const detectedName = response.data.location?.display_name || 'Your Location';
+        setCurrentLocation(detectedName);
         
         // Also load AQI and history
         try {
@@ -96,23 +131,36 @@ const Weather = () => {
           const historyResponse = await axios.get(
             `${BACKEND}/api/aqi/history?lat=${response.data.location.lat}&lon=${response.data.location.lon}&days=7`
           );
-          setAQIHistory(historyResponse.data?.source === 'openweather' ? historyResponse.data : null);
+          const nextHistory = historyResponse.data?.source === 'openweather' ? historyResponse.data : null;
+          setAQIHistory(nextHistory);
+          persistWeatherBootstrap({
+            weather: completeWeather,
+            aqi: aqiData,
+            aqiHistory: nextHistory,
+            currentLocationName: detectedName,
+          });
         } catch (err) {
           console.error('AQI data fetch error:', err);
           setAQIData(null);
           setAQIHistory(null);
+          persistWeatherBootstrap({
+            weather: completeWeather,
+            aqi: null,
+            aqiHistory: null,
+            currentLocationName: detectedName,
+          });
         }
       }
     } catch (err) {
       console.error('Auto-detect failed:', err);
       setError('Unable to detect location. Please search for a city.');
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   };
 
-  const loadWeatherData = async (locationQuery) => {
-    setLoading(true);
+  const loadWeatherData = async (locationQuery, { background = false } = {}) => {
+    if (!background) setLoading(true);
     setError(null);
     
     try {
@@ -123,37 +171,66 @@ const Weather = () => {
 
       if (weather.status === 'fulfilled' && weather.value) {
         setWeatherData(weather.value);
+        let resolvedLocationName = currentLocation;
         if (weather.value.location) {
-          setCurrentLocation(weather.value.location.display_name || weather.value.location.name || locationQuery);
+          resolvedLocationName = weather.value.location.display_name || weather.value.location.name || locationQuery;
+          setCurrentLocation(resolvedLocationName);
         }
-      } else {
-        setError('Could not load weather data');
-      }
+        let nextHistory = null;
 
-      if (aqi.status === 'fulfilled' && aqi.value) {
-        setAQIData(aqi.value);
-        
-        // Load 7-day AQI history
-        try {
-          const coords = weather.value.location;
-          const historyResponse = await axios.get(
-            `${BACKEND}/api/aqi/history?lat=${coords.lat}&lon=${coords.lon}&days=7`
-          );
-          setAQIHistory(historyResponse.data?.source === 'openweather' ? historyResponse.data : null);
-        } catch (err) {
-          console.error('AQI history fetch error:', err);
+        if (aqi.status === 'fulfilled' && aqi.value) {
+          setAQIData(aqi.value);
+
+          // Load 7-day AQI history
+          try {
+            const coords = weather.value.location;
+            const historyResponse = await axios.get(
+              `${BACKEND}/api/aqi/history?lat=${coords.lat}&lon=${coords.lon}&days=7`
+            );
+            nextHistory = historyResponse.data?.source === 'openweather' ? historyResponse.data : null;
+            setAQIHistory(nextHistory);
+          } catch (err) {
+            console.error('AQI history fetch error:', err);
+            setAQIHistory(null);
+          }
+        } else {
+          console.error('AQI fetch failed:', aqi.reason || 'Unknown error');
+          setAQIData(null); // Clear previous AQI data
           setAQIHistory(null);
         }
+
+        persistWeatherBootstrap({
+          weather: weather.value,
+          aqi: aqi.status === 'fulfilled' ? aqi.value : null,
+          aqiHistory: nextHistory,
+          currentLocationName: resolvedLocationName,
+        });
       } else {
-        console.error('AQI fetch failed:', aqi.reason || 'Unknown error');
-        setAQIData(null); // Clear previous AQI data
-        setAQIHistory(null);
+        const cached = readTimedCache(WEATHER_BOOTSTRAP_CACHE_KEY);
+        if (cached?.weather) {
+          setWeatherData(cached.weather);
+          setAQIData(cached.aqi || null);
+          setAQIHistory(cached.aqiHistory || null);
+          setCurrentLocation(cached.currentLocationName || currentLocation || 'Last known location');
+          setError('Live weather is temporarily unavailable. Showing recent data.');
+        } else {
+          setError('Could not load weather data');
+        }
       }
     } catch (err) {
       console.error('Error loading weather:', err);
-      setError('Failed to load weather data. Please try again.');
+      const cached = readTimedCache(WEATHER_BOOTSTRAP_CACHE_KEY);
+      if (cached?.weather) {
+        setWeatherData(cached.weather);
+        setAQIData(cached.aqi || null);
+        setAQIHistory(cached.aqiHistory || null);
+        setCurrentLocation(cached.currentLocationName || currentLocation || 'Last known location');
+        setError('Live weather request failed. Showing recent data.');
+      } else {
+        setError('Failed to load weather data. Please try again.');
+      }
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   };
 

@@ -41,26 +41,58 @@ import { getAuthHeadersForApi } from '@/utils/authHeaders';
 import { Skeleton } from 'boneyard-js/react';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
+const ADMIN_DASHBOARD_SNAPSHOT_KEY = 'admin_dashboard_snapshot_v1';
+const ADMIN_DASHBOARD_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
+
+const readAdminSnapshot = () => {
+  try {
+    const raw = localStorage.getItem(ADMIN_DASHBOARD_SNAPSHOT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.savedAt || Date.now() - Number(parsed.savedAt) > ADMIN_DASHBOARD_SNAPSHOT_TTL_MS) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const writeAdminSnapshot = (payload) => {
+  try {
+    localStorage.setItem(
+      ADMIN_DASHBOARD_SNAPSHOT_KEY,
+      JSON.stringify({
+        savedAt: Date.now(),
+        ...payload,
+      })
+    );
+  } catch {
+    // Ignore storage quota/private mode failures.
+  }
+};
+
+const snapshotAtBoot = readAdminSnapshot();
 
 const AdminDashboard = () => {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState('overview');
-  const [alerts, setAlerts] = useState([]);
-  const [pendingAlerts, setPendingAlerts] = useState([]);
-  const [safetyStatus, setSafetyStatus] = useState(null);
-  const [smsStatus, setSmsStatus] = useState(null);
-  const [incidents, setIncidents] = useState([]);
-  const [smsLogs, setSmsLogs] = useState([]);
+  const [alerts, setAlerts] = useState(() => snapshotAtBoot?.alerts || []);
+  const [pendingAlerts, setPendingAlerts] = useState(() => snapshotAtBoot?.pendingAlerts || []);
+  const [safetyStatus, setSafetyStatus] = useState(() => snapshotAtBoot?.safetyStatus || null);
+  const [smsStatus, setSmsStatus] = useState(() => snapshotAtBoot?.smsStatus || null);
+  const [incidents, setIncidents] = useState(() => snapshotAtBoot?.incidents || []);
+  const [smsLogs, setSmsLogs] = useState(() => snapshotAtBoot?.smsLogs || []);
   const [retractReason, setRetractReason] = useState('');
   const [retractingId, setRetractingId] = useState(null);
   const [actionFeedback, setActionFeedback] = useState('');
-  const [stats, setStats] = useState(null);
+  const [stats, setStats] = useState(() => snapshotAtBoot?.stats || null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [systemLogs, setSystemLogs] = useState([]);
-  const [reports, setReports] = useState([]);
+  const [lastUpdated, setLastUpdated] = useState(() => snapshotAtBoot?.lastUpdated ? new Date(snapshotAtBoot.lastUpdated) : null);
+  const [systemLogs, setSystemLogs] = useState(() => snapshotAtBoot?.systemLogs || []);
+  const [reports, setReports] = useState(() => snapshotAtBoot?.reports || []);
   const [reportFilter, setReportFilter] = useState('pending');
-  const [verificationPosts, setVerificationPosts] = useState([]);
+  const [verificationPosts, setVerificationPosts] = useState(() => snapshotAtBoot?.verificationPosts || []);
   const [verificationFilter, setVerificationFilter] = useState('pending_admin_review');
   const [verificationNotes, setVerificationNotes] = useState({});
   const [verificationReports, setVerificationReports] = useState({});
@@ -79,7 +111,7 @@ const AdminDashboard = () => {
   });
 
   // Telegram state
-  const [telegramStats, setTelegramStats] = useState(null);
+  const [telegramStats, setTelegramStats] = useState(() => snapshotAtBoot?.telegramStats || null);
   const [tgTestChatId, setTgTestChatId] = useState('');
   const [tgTestMsg, setTgTestMsg] = useState('');
   const [tgBroadcastMsg, setTgBroadcastMsg] = useState('');
@@ -88,7 +120,7 @@ const AdminDashboard = () => {
   const [tgFeedback, setTgFeedback] = useState('');
 
   // Multi-channel broadcast state
-  const [broadcastChannelStats, setBroadcastChannelStats] = useState(null);
+  const [broadcastChannelStats, setBroadcastChannelStats] = useState(() => snapshotAtBoot?.broadcastChannelStats || null);
   const [broadcastTitle, setBroadcastTitle] = useState('');
   const [broadcastMessage, setBroadcastMessage] = useState('');
   const [broadcastPrompt, setBroadcastPrompt] = useState('');
@@ -104,7 +136,7 @@ const AdminDashboard = () => {
     push: false,
     websocket: false,
   });
-  const [dataSummary, setDataSummary] = useState(null);
+  const [dataSummary, setDataSummary] = useState(() => snapshotAtBoot?.dataSummary || null);
   const [ingestionRunning, setIngestionRunning] = useState(false);
   const [ingestionMode, setIngestionMode] = useState('');
   const [mosdacBackfillDays, setMosdacBackfillDays] = useState(7);
@@ -176,6 +208,41 @@ const AdminDashboard = () => {
     const interval = setInterval(() => { fetchData(); if (activeTab === 'reports') fetchReports(); }, 30000);
     return () => clearInterval(interval);
   }, [fetchData, fetchReports, activeTab]);
+
+  useEffect(() => {
+    if (!lastUpdated) return;
+    writeAdminSnapshot({
+      alerts,
+      pendingAlerts,
+      safetyStatus,
+      smsStatus,
+      incidents,
+      smsLogs,
+      stats,
+      systemLogs,
+      reports,
+      verificationPosts,
+      telegramStats,
+      broadcastChannelStats,
+      dataSummary,
+      lastUpdated: lastUpdated.toISOString(),
+    });
+  }, [
+    alerts,
+    pendingAlerts,
+    safetyStatus,
+    smsStatus,
+    incidents,
+    smsLogs,
+    stats,
+    systemLogs,
+    reports,
+    verificationPosts,
+    telegramStats,
+    broadcastChannelStats,
+    dataSummary,
+    lastUpdated,
+  ]);
 
   const filteredVerificationPosts = verificationFilter === 'all'
     ? verificationPosts
@@ -551,7 +618,18 @@ const AdminDashboard = () => {
     <Skeleton
       name="admin-dashboard-page"
       loading={initialLoading}
-      fallback={<p className="py-10 text-center text-sm text-muted-foreground">Loading admin dashboard...</p>}
+      fallback={(
+        <div className="space-y-4 py-2">
+          <div className="h-20 rounded-xl bg-primary/10 animate-pulse" />
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="h-28 rounded-xl bg-primary/10 animate-pulse" />
+            <div className="h-28 rounded-xl bg-primary/10 animate-pulse" />
+            <div className="h-28 rounded-xl bg-primary/10 animate-pulse" />
+            <div className="h-28 rounded-xl bg-primary/10 animate-pulse" />
+          </div>
+          <div className="h-[360px] rounded-xl bg-primary/10 animate-pulse" />
+        </div>
+      )}
     >
     <div className="max-w-7xl mx-auto space-y-6 pb-6">
       <div className="sticky top-0 z-20 bg-background/90 backdrop-blur-sm border-b -mx-4 px-4 py-4 md:mx-0 md:px-0 md:border-0 md:bg-transparent md:backdrop-blur-none">

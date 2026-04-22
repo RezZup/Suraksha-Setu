@@ -22,6 +22,7 @@ import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Skeleton } from '@/components/ui/skeleton';
 import Quiz from '@/components/student/Quiz';
 import StudentChat from '@/components/student/StudentChat';
 import { useLocation } from '@/contexts/LocationContext';
@@ -291,6 +292,23 @@ const StudentPortal = () => {
 
   const aqiLabel = aqiSnapshot?.aqi_label || 'Unavailable';
   const locationLabel = location?.city || location?.state || 'Location not set';
+  const initialPortalLoading = (locationLoading || liveDataLoading) && !location && !weatherSnapshot && !aqiSnapshot;
+
+  if (initialPortalLoading) {
+    return (
+      <div className="mx-auto max-w-7xl space-y-6">
+        <Skeleton className="h-40 rounded-xl" />
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <Skeleton className="h-28 rounded-xl" />
+          <Skeleton className="h-28 rounded-xl" />
+          <Skeleton className="h-28 rounded-xl" />
+          <Skeleton className="h-28 rounded-xl" />
+        </div>
+        <Skeleton className="h-12 rounded-xl" />
+        <Skeleton className="h-[420px] rounded-xl" />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">

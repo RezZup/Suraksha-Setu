@@ -30,41 +30,40 @@ from database import (
     SourceIngestionLog,
 )
 from firebase_auth import verify_firebase_token
-
 logger = logging.getLogger(__name__)
 
-_DEVELOPER_ROLES = {"developer"}
+_SCIENTIST_PORTAL_ALLOWED_ROLES = {"scientist", "admin", "developer"}
 
 
-def _developer_role_from_token(token: dict) -> str:
+def _role_from_token(token: dict) -> str:
     claims = token.get("firebase_claims") or {}
     role = claims.get("role") or claims.get("user_type") or token.get("role") or ""
     return str(role).strip().lower()
 
 
-async def require_developer_access(
+async def require_scientist_portal_access(
     token: dict = Depends(verify_firebase_token),
     db: AsyncSession = Depends(get_db),
 ):
-    """Restrict scientist dataset operations to developer users only."""
-    token_role = _developer_role_from_token(token)
-    if token_role in _DEVELOPER_ROLES:
+    """Allow only scientist/admin/developer users to access scientist APIs."""
+    token_role = _role_from_token(token)
+    if token_role in _SCIENTIST_PORTAL_ALLOWED_ROLES:
         return token
 
     uid = token.get("uid")
     if uid:
         db_user = await db.get(User, uid)
         db_role = (db_user.user_type or "").strip().lower() if db_user else ""
-        if db_user and db_user.is_active and db_role in _DEVELOPER_ROLES:
+        if db_user and db_user.is_active and db_role in _SCIENTIST_PORTAL_ALLOWED_ROLES:
             return token
 
-    raise HTTPException(status_code=403, detail="Developer access required")
+    raise HTTPException(status_code=403, detail="Scientist portal access requires scientist, admin, or developer role")
 
 
 scientist_router = APIRouter(
     prefix="/api/scientist",
     tags=["Scientist"],
-    dependencies=[Depends(require_developer_access)],
+    dependencies=[Depends(require_scientist_portal_access)],
 )
 
 DATASET_MODEL_MAP = {

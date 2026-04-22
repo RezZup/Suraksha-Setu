@@ -17,11 +17,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from 'sonner';
 import DataExport from "@/components/scientist/DataExport";
 import ResearcherChat from "@/components/scientist/ResearcherChat";
 import { useAuth } from "@/contexts/AuthContext";
-import { getAuthHeadersForApi } from "@/utils/authHeaders";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 
@@ -43,24 +43,21 @@ const ScientistPortal = () => {
   const [exportFormat, setExportFormat] = useState('csv');
   const [payloadMode, setPayloadMode] = useState('metadata');
   const [exportLimit, setExportLimit] = useState(200000);
+  const allowedRoles = new Set(['scientist', 'admin', 'developer']);
+  const currentRole = String(user?.role || '').toLowerCase();
+  const hasScientistPortalAccess = allowedRoles.has(currentRole);
 
-  const userRole = String(user?.role || '').toLowerCase();
-  const isDeveloper = userRole === 'developer';
-
-  const getDeveloperHeaders = () => {
-    if (token) return { Authorization: `Bearer ${token}` };
-    return getAuthHeadersForApi(BACKEND_URL, 'developer');
-  };
+  const getApiHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {});
 
   useEffect(() => {
-    if (!isDeveloper) {
+    if (!hasScientistPortalAccess) {
       setModels([]);
       setAnalytics(null);
       setAnalyticsLoading(false);
       return;
     }
 
-    const headers = getDeveloperHeaders();
+    const headers = getApiHeaders();
 
     fetch(`${BACKEND_URL}/api/scientist/models`, { headers })
       .then(r => r.ok ? r.json() : null)
@@ -76,7 +73,43 @@ const ScientistPortal = () => {
       .then(data => setAnalytics(data))
       .catch(() => setAnalytics(null))
       .finally(() => setAnalyticsLoading(false));
-  }, [isDeveloper, token]);
+  }, [token, hasScientistPortalAccess]);
+
+  if (!hasScientistPortalAccess) {
+    return (
+      <div className="max-w-3xl mx-auto space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>Access Restricted</CardTitle>
+            <CardDescription>
+              Only scientist, admin, and developer accounts can access the scientist portal.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Current role: {currentRole || 'unknown'}
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const initialPortalLoading = analyticsLoading && !analytics && models.length === 0;
+
+  if (initialPortalLoading) {
+    return (
+      <div className="max-w-7xl mx-auto space-y-6">
+        <Skeleton className="h-24 rounded-xl" />
+        <Skeleton className="h-10 w-[540px] rounded-lg" />
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <Skeleton className="lg:col-span-2 h-[320px] rounded-xl" />
+          <Skeleton className="h-[320px] rounded-xl" />
+        </div>
+        <Skeleton className="h-[420px] rounded-xl" />
+      </div>
+    );
+  }
 
   const handleUploadDataset = () => {
     const input = document.createElement('input');
@@ -91,7 +124,7 @@ const ScientistPortal = () => {
       formData.append('file', file);
 
       try {
-        const headers = getDeveloperHeaders();
+        const headers = getApiHeaders();
         const response = await fetch(`${BACKEND_URL}/api/scientist/upload-dataset`, {
           method: 'POST',
           headers,
@@ -116,7 +149,7 @@ const ScientistPortal = () => {
   const handleRunSimulation = async () => {
     setRunningSimulation(true);
     try {
-      const headers = getDeveloperHeaders();
+      const headers = getApiHeaders();
       const response = await fetch(`${BACKEND_URL}/api/scientist/run-simulation`, {
         method: 'POST',
         headers: {
@@ -148,7 +181,7 @@ const ScientistPortal = () => {
 
   const handleExportModel = async (modelId) => {
     try {
-      const headers = getDeveloperHeaders();
+      const headers = getApiHeaders();
       const response = await fetch(`${BACKEND_URL}/api/scientist/export-model/${modelId}`, {
         headers,
         credentials: 'include'
@@ -181,7 +214,7 @@ const ScientistPortal = () => {
       formData.append('file', file);
 
       try {
-        const headers = getDeveloperHeaders();
+        const headers = getApiHeaders();
         const response = await fetch(`${BACKEND_URL}/api/scientist/import-model`, {
           method: 'POST',
           headers,
@@ -212,7 +245,7 @@ const ScientistPortal = () => {
 
   const handleExportTrainingDataset = async (datasetType) => {
     try {
-      const headers = getDeveloperHeaders();
+      const headers = getApiHeaders();
       const params = new URLSearchParams({
         limit: String(Math.max(1, Math.min(exportLimit || 50000, 200000))),
         format: exportFormat,
@@ -236,26 +269,6 @@ const ScientistPortal = () => {
       toast.error(error.message || `Error exporting ${datasetType} dataset`);
     }
   };
-
-  if (!isDeveloper) {
-    return (
-      <div className="max-w-3xl mx-auto space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Developer Access Required</CardTitle>
-            <CardDescription>
-              Scientist portal dataset ingestion and export features are restricted to developer users.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-muted-foreground">
-              Current role: {userRole || 'unknown'}. Sign in with a developer account to access full source export tools.
-            </p>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">

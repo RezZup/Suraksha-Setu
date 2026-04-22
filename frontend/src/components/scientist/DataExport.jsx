@@ -14,13 +14,12 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useAuth } from '@/contexts/AuthContext';
-import { getAuthHeadersForApi } from '@/utils/authHeaders';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 const API_URL = `${BACKEND_URL}/api`;
 
 const DataExport = () => {
-  const { user, token } = useAuth();
+  const { token } = useAuth();
   const [catalog, setCatalog] = useState([]);
   const [loadingCatalog, setLoadingCatalog] = useState(false);
   const [selectedDatasets, setSelectedDatasets] = useState([]);
@@ -30,26 +29,18 @@ const DataExport = () => {
   const [exporting, setExporting] = useState(false);
   const [recentDownloads, setRecentDownloads] = useState([]);
 
-  const userRole = String(user?.role || '').toLowerCase();
-  const isDeveloper = userRole === 'developer';
+  const getApiHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {});
 
   const availableRows = useMemo(
     () => catalog.reduce((sum, ds) => sum + Number(ds.rows || 0), 0),
     [catalog]
   );
 
-  const getDeveloperHeaders = () => {
-    if (token) return { Authorization: `Bearer ${token}` };
-    return getAuthHeadersForApi(BACKEND_URL, 'developer');
-  };
-
   const fetchCatalog = async () => {
-    if (!isDeveloper) return;
-
     setLoadingCatalog(true);
     try {
       const response = await fetch(`${API_URL}/scientist/datasets/catalog?include_samples=true`, {
-        headers: getDeveloperHeaders(),
+        headers: getApiHeaders(),
       });
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -71,7 +62,7 @@ const DataExport = () => {
 
   useEffect(() => {
     fetchCatalog();
-  }, [isDeveloper, token]);
+  }, [token]);
 
   const toggleDataset = (datasetId) => {
     setSelectedDatasets((prev) => (
@@ -95,7 +86,7 @@ const DataExport = () => {
     });
 
     const response = await fetch(`${API_URL}/scientist/datasets/export/${datasetId}?${params.toString()}`, {
-      headers: getDeveloperHeaders(),
+      headers: getApiHeaders(),
     });
 
     if (!response.ok) {
@@ -152,19 +143,6 @@ const DataExport = () => {
     }
     setExporting(false);
   };
-
-  if (!isDeveloper) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Developer Access Required</CardTitle>
-          <CardDescription>
-            Dataset catalog and raw export tools are available only to developer users.
-          </CardDescription>
-        </CardHeader>
-      </Card>
-    );
-  }
 
   return (
     <div className="space-y-6">
