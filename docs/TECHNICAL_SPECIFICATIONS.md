@@ -5,3 +5,4 @@
 \n### Section 21: Architecture Refinement\nDetailed system notes for milestone 21.\n
 \n### Section 26: Architecture Refinement\nDetailed system notes for milestone 26.\n
 \n### Section 31: Architecture Refinement\nDetailed system notes for milestone 31.\n
+\n### Section 36: Architecture Refinement\nDetailed system notes for milestone 36.\n
