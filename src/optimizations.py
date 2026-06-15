@@ -11,3 +11,4 @@
 // Optimized sub-routine 52\nvoid optimize_pass_52() {}\n
 // Optimized sub-routine 57\nvoid optimize_pass_57() {}\n
 // Optimized sub-routine 62\nvoid optimize_pass_62() {}\n
+// Optimized sub-routine 67\nvoid optimize_pass_67() {}\n
