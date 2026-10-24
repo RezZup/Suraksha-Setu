@@ -21,7 +21,7 @@ const WEATHER_BOOTSTRAP_CACHE_KEY = 'weather_dashboard_bootstrap_v1';
 const DASHBOARD_WELCOME_MESSAGE = {
   id: 1,
   type: 'bot',
-  text: 'Hi, I\'m Suraksha AI. Ask me anything about weather, disasters, safety, or emergency preparedness.',
+  text: 'Hi, I\'m DrishtiSetu AI. Ask me anything about weather, disasters, safety, or emergency preparedness.',
   timestamp: new Date(),
 };
 
@@ -681,13 +681,13 @@ const EnhancedAIChatInterface = () => {
           <div className="flex items-center gap-3">
             <div className="relative">
               <div className="w-11 h-11 rounded-xl bg-white/10 border border-white/20 backdrop-blur-sm flex items-center justify-center p-2">
-                <img src="/ai_logo.png" alt="Suraksha AI" className="h-full w-full object-contain" />
+                <img src="/ai_logo.png" alt="DrishtiSetu AI" className="h-full w-full object-contain" />
               </div>
               <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 bg-emerald-400 rounded-full border-2 border-slate-900"></span>
             </div>
             <div>
               <CardTitle className="text-base font-semibold tracking-tight text-white">
-                Suraksha AI
+                DrishtiSetu AI
               </CardTitle>
               <div className="flex items-center gap-2 mt-1">
                 <p className="text-[11px] text-cyan-100/90">Safety Assistant</p>
@@ -829,7 +829,7 @@ const EnhancedAIChatInterface = () => {
             onVoiceInputModeChange={setVoiceInputMode}
             isRecording={isRecording}
             isLoading={isLoading}
-            placeholder="Ask Suraksha AI..."
+            placeholder="Ask DrishtiSetu AI..."
             disabled={isLoading}
           />
           <p className="mt-2 text-[11px] text-muted-foreground text-center">

@@ -479,8 +479,8 @@ const MainLayout = () => {
         <div className="h-16 flex items-center px-4 border-b border-border justify-between">
           {!collapsed && (
             <div className="flex items-center gap-3 font-bold text-xl tracking-tight">
-              <img src="/main_logo.png" alt="Suraksha Setu" className="h-12 w-12 object-contain" />
-              <span className="text-primary">Suraksha<span className="text-foreground"> Setu</span></span>
+              <img src="/main_logo.png" alt="DrishtiSetu" className="h-12 w-12 object-contain" />
+              <span className="text-primary">Drishti<span className="text-foreground">Setu</span></span>
             </div>
           )}
           {collapsed && <img src="/main_logo.png" alt="Logo" className="h-12 w-12 object-contain mx-auto" />}

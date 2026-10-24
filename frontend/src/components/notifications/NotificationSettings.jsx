@@ -94,7 +94,7 @@ const NotificationSettings = ({ compact = false }) => {
   const handleTestNotification = async () => {
     try {
       await showLocalNotification('🧪 Test Alert', {
-        body: 'This is a test notification from Suraksha Setu',
+        body: 'This is a test notification from DrishtiSetu',
         icon: '/logo192.png',
         badge: '/logo192.png',
         tag: 'test-notification',

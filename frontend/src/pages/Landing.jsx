@@ -75,7 +75,7 @@ const Landing = () => {
             <div className="bg-white border border-slate-200 p-3 rounded-xl shadow-sm">
               <img src="/main_logo.png" alt="Logo" className="w-10 h-10 object-contain" />
             </div>
-            <span className="text-2xl font-semibold tracking-tight">Suraksha Setu</span>
+            <span className="text-2xl font-semibold tracking-tight">DrishtiSetu</span>
           </div>
           <div className="flex items-center gap-3">
             <button
@@ -112,7 +112,7 @@ const Landing = () => {
                 built for every Indian.
               </h1>
               <p className="text-lg md:text-xl text-slate-600 max-w-3xl mx-auto leading-relaxed">
-                Suraksha Setu transforms complex data into clear, localized guidance with
+                DrishtiSetu transforms complex data into clear, localized guidance with
                 multilingual support, PIN-code precision, and research-ready insights.
               </p>
             </div>

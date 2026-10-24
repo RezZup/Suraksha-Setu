@@ -94,13 +94,13 @@ const Login = () => {
         <CardHeader className="space-y-1 text-center">
           <div className="flex justify-center mb-4">
             <div className="h-24 w-24 bg-gradient-to-br from-primary to-purple-500 rounded-full flex items-center justify-center shadow-lg p-4">
-              <img src="/main_logo.png" alt="Suraksha Setu" className="h-full w-full object-contain" />
+              <img src="/main_logo.png" alt="DrishtiSetu" className="h-full w-full object-contain" />
             </div>
           </div>
           <CardTitle className="text-3xl font-bold bg-gradient-to-r from-primary to-purple-500 bg-clip-text text-transparent">
             Welcome Back
           </CardTitle>
-          <CardDescription className="text-base">Sign in to access Suraksha Setu</CardDescription>
+          <CardDescription className="text-base">Sign in to access DrishtiSetu</CardDescription>
         </CardHeader>
         <CardContent>
           {!firebaseReady && (

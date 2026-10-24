@@ -33,7 +33,7 @@ const AppLoadingScreen = ({
               <ShieldCheck className="h-5 w-5 text-cyan-200" />
             </div>
             <div>
-              <p className="text-sm text-cyan-100/90 font-semibold">Suraksha Setu</p>
+              <p className="text-sm text-cyan-100/90 font-semibold">DrishtiSetu</p>
               <p className="text-xs text-slate-300">Emergency Intelligence Grid</p>
             </div>
           </div>

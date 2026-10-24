@@ -265,7 +265,7 @@ async def lifespan(app: FastAPI):
 #  APP
 # ──────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="Suraksha Setu API",
+    title="DrishtiSetu API",
     version="3.0.0",
     description="AI-Powered Disaster Management Platform for India",
     lifespan=lifespan,
@@ -1589,7 +1589,7 @@ async def telegram_webhook(request: Request, db: AsyncSession = Depends(get_db))
 @app.get("/")
 def read_root():
     return {
-        "status": "Suraksha Setu API v3.0 Online",
+        "status": "DrishtiSetu API v3.0 Online",
         "ai_features": [
             "chat", "function_calling", "whisper", "vision",
             "embeddings", "rag", "tts", "agents",

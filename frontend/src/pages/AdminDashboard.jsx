@@ -18,7 +18,8 @@ import {
   Send,
   Bot,
   Radio,
-  Database
+  Database,
+  Download
 } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -141,6 +142,7 @@ const AdminDashboard = () => {
   const [ingestionMode, setIngestionMode] = useState('');
   const [mosdacBackfillDays, setMosdacBackfillDays] = useState(7);
   const [mosdacBackfillLimit, setMosdacBackfillLimit] = useState(80);
+  const [mosdacProofDownloading, setMosdacProofDownloading] = useState(false);
 
   const getAuthHeaders = () => {
     return getAuthHeadersForApi(API_URL, 'admin');
@@ -606,6 +608,45 @@ const AdminDashboard = () => {
     }
   };
 
+  const handleDownloadMosdacProof = async () => {
+    setMosdacProofDownloading(true);
+    try {
+      const res = await fetch(`${API_URL}/admin/data/export/mosdac-proof.csv?limit=2500`, {
+        method: 'GET',
+        headers: { ...getAuthHeaders() },
+      });
+
+      if (!res.ok) {
+        let message = 'MOSDAC proof export failed';
+        try {
+          const payload = await res.json();
+          message = payload?.detail || payload?.error || message;
+        } catch {
+          const txt = await res.text();
+          message = txt || message;
+        }
+        throw new Error(message);
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      link.href = url;
+      link.download = `mosdac-proof-human-readable-${stamp}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+
+      setActionFeedback('MOSDAC proof CSV downloaded: includes human-readable events plus metadata traceability.');
+    } catch (err) {
+      setActionFeedback(`Error: ${err.message}`);
+    } finally {
+      setMosdacProofDownloading(false);
+    }
+  };
+
   const activeAlerts = Array.isArray(alerts) ? alerts.filter(a => a.is_active && !a.retracted) : [];
   const handleManualRefresh = () => {
     fetchData();
@@ -930,6 +971,20 @@ const AdminDashboard = () => {
                 >
                   {ingestionRunning && ingestionMode === 'disasters' ? 'Running...' : 'Run USGS + GDACS'}
                 </Button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  variant="secondary"
+                  onClick={handleDownloadMosdacProof}
+                  disabled={mosdacProofDownloading || ingestionRunning}
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  {mosdacProofDownloading ? 'Preparing CSV...' : 'Download MOSDAC Proof CSV'}
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Exports human-readable MOSDAC-derived events with source traceability in one CSV.
+                </p>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 border rounded-lg p-3">

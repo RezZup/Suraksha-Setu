@@ -25,7 +25,7 @@ const baseTranslation = {
   'role.user': 'User',
 
   // Dashboard
-  'dashboard.welcome': 'Welcome to Suraksha Setu',
+  'dashboard.welcome': 'Welcome to DrishtiSetu',
   'dashboard.commandCenter': 'Command Center',
   'dashboard.commandSubtitle': 'Live disaster management and safety monitoring dashboard',
   'dashboard.liveOverview': 'Live operations overview',

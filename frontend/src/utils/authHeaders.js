@@ -43,7 +43,8 @@ const createLocalDevToken = (role = 'admin') => {
 
 export const getAuthHeadersForApi = (apiUrl, role = 'admin') => {
   const existingToken = localStorage.getItem('auth_token') || '';
-  if (existingToken) {
+  const looksLikeJwt = existingToken.split('.').length === 3;
+  if (existingToken && looksLikeJwt) {
     return { Authorization: `Bearer ${existingToken}` };
   }
 

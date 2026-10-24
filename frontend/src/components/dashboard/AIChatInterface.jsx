@@ -365,7 +365,7 @@ const AIChatInterface = () => {
             <div>
               <CardTitle className="text-xl flex items-center gap-2">
                 <span className="bg-gradient-to-r from-blue-600 via-purple-600 to-pink-600 bg-clip-text text-transparent font-extrabold">
-                  Suraksha AI
+                  DrishtiSetu AI
                 </span>
                 <Badge variant="secondary" className="text-xs shadow-sm animate-pulse">
                   <div className="flex items-center gap-1.5">
@@ -437,7 +437,7 @@ const AIChatInterface = () => {
                 </div>
                 <div>
                   <h3 className="text-lg font-bold mb-2 bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-                    Welcome to Suraksha AI!
+                    Welcome to DrishtiSetu AI!
                   </h3>
                   <p className="text-sm text-muted-foreground max-w-md mx-auto">
                     Ask me anything about weather, disasters, air quality, or safety alerts in any Indian language.

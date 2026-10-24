@@ -51,7 +51,7 @@ const ChatBot = () => {
       setMessages([{
         id: 'welcome',
         message: '',
-        response: '👋 Hello! I\'m Suraksha Setu, your disaster management assistant. I can help you with:\n\n- **Real-time disaster alerts** and weather updates\n- **Emergency preparedness** tips and checklists\n- **Safety guidelines** for earthquakes, cyclones, floods, and more\n- **Air quality** information and health recommendations\n- **Evacuation** routes and shelter locations\n\nFeel free to ask me anything about staying safe during emergencies!',
+        response: '👋 Hello! I\'m DrishtiSetu, your disaster management assistant. I can help you with:\n\n- **Real-time disaster alerts** and weather updates\n- **Emergency preparedness** tips and checklists\n- **Safety guidelines** for earthquakes, cyclones, floods, and more\n- **Air quality** information and health recommendations\n- **Evacuation** routes and shelter locations\n\nFeel free to ask me anything about staying safe during emergencies!',
         timestamp: new Date().toISOString(),
         isUser: false
       }]);
@@ -138,7 +138,7 @@ const ChatBot = () => {
       setMessages([{
         id: 'welcome',
         message: '',
-        response: '👋 Hello! I\'m Suraksha Setu, your disaster management assistant. Ask about weather, alerts, safety tips, and emergency readiness.',
+        response: '👋 Hello! I\'m DrishtiSetu, your disaster management assistant. Ask about weather, alerts, safety tips, and emergency readiness.',
         timestamp: new Date().toISOString(),
         isUser: false
       }]);
@@ -400,7 +400,7 @@ const ChatBot = () => {
                     <MessageCircle className="h-5 w-5" />
                   </div>
                   <div>
-                    <h3 className="font-semibold text-lg" data-testid="chatbot-title">Suraksha Setu</h3>
+                    <h3 className="font-semibold text-lg" data-testid="chatbot-title">DrishtiSetu</h3>
                     <p className="text-xs opacity-90">Disaster Management Assistant</p>
                   </div>
                 </div>
@@ -434,7 +434,7 @@ const ChatBot = () => {
                       <MessageCircle className="h-8 w-8 text-primary" />
                     </div>
                     <div>
-                      <h4 className="font-semibold text-lg mb-2">Welcome to Suraksha Setu! 🛡️</h4>
+                      <h4 className="font-semibold text-lg mb-2">Welcome to DrishtiSetu! 🛡️</h4>
                       <p className="text-sm text-muted-foreground mb-4">
                         I'm your AI disaster management assistant. I can help you with real-time alerts, safety tips, emergency preparedness, and answer any questions about disasters and weather conditions in India.
                       </p>

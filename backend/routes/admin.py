@@ -2,6 +2,7 @@
 Admin API Routes for Alert Management, Users & Stats
 """
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from database import (
@@ -32,6 +33,8 @@ import json
 import asyncio
 import os
 import copy
+import csv
+import io
 from datetime import datetime, timezone, timedelta
 from firebase_auth import verify_firebase_token
 from ai.openai_client import ai_client, GOOGLE_MODEL_CHAT, OPENROUTER_CHAT_MODEL
@@ -86,6 +89,14 @@ COMMUNITY_VERIFICATION_STATUS_META = {
     "not_required": {"label": "No Verification Needed", "progress": 100},
 }
 
+MOSDAC_DATASET_LABELS = {
+    "3RIMG_L2B_RAIN": "INSAT-3DR Rainfall Estimate",
+    "3SMAP_L3_SM": "SMAP Soil Moisture",
+    "3SCAT_L2B": "Scatsat-1 Ocean Wind Vectors",
+    "3RIMG_L1B": "INSAT-3DR Visible/IR Imagery",
+    "3RIMG_L2B_SST": "INSAT-3DR Sea Surface Temperature",
+}
+
 
 def _normalize_channel_list(channels: Optional[List[str]]) -> List[str]:
     if not channels:
@@ -98,6 +109,19 @@ def _normalize_channel_list(channels: Optional[List[str]]) -> List[str]:
             seen.add(key)
             normalized.append(key)
     return normalized
+
+
+def _safe_json_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
 
 
 def _extract_lat_lon(location_meta: Dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
@@ -1091,6 +1115,127 @@ async def get_admin_stats(db=Depends(get_db)):
 async def get_admin_data_summary(recent_hours: int = 24, db=Depends(get_db)):
     """Detailed row counts by dataset/source so admin can audit stored data volume."""
     return await _build_data_summary(db=db, recent_hours=recent_hours)
+
+
+@router.get("/data/export/mosdac-proof.csv")
+async def export_mosdac_proof_csv(limit: int = 1000, db=Depends(get_db)):
+    """
+    Export MOSDAC proof data as CSV with human-readable fields.
+    Includes:
+    1) Human-readable MOSDAC-derived flood events
+    2) Recent MOSDAC metadata rows for traceability
+    """
+    row_limit = max(1, min(int(limit or 1000), 10000))
+
+    flood_rows = (await db.execute(
+        select(FloodDataset)
+        .where(FloodDataset.source == "MOSDAC")
+        .order_by(FloodDataset.ingested_at.desc())
+        .limit(row_limit)
+    )).scalars().all()
+
+    metadata_rows = (await db.execute(
+        select(MOSDACMetadata)
+        .order_by(MOSDACMetadata.created_at.desc())
+        .limit(row_limit)
+    )).scalars().all()
+
+    metadata_by_identifier: Dict[str, Any] = {}
+    for meta in metadata_rows:
+        identifier = str(meta.identifier or "").strip()
+        if identifier and identifier not in metadata_by_identifier:
+            metadata_by_identifier[identifier] = meta
+
+    headers = [
+        "row_type",
+        "event_date",
+        "event_time",
+        "event_title",
+        "event_location",
+        "event_severity",
+        "event_status",
+        "event_source",
+        "event_description",
+        "mosdac_identifier",
+        "mosdac_dataset_id",
+        "mosdac_dataset_name",
+        "satellite_timestamp",
+        "satellite_product_title",
+        "event_ingested_at",
+        "metadata_created_at",
+        "proof_trace_status",
+    ]
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=headers)
+    writer.writeheader()
+
+    # Human-readable, prediction-facing event rows.
+    for row in flood_rows:
+        raw_payload = _safe_json_dict(row.raw_payload)
+        identifier = str(raw_payload.get("mosdac_id") or "").strip()
+        linked_meta = metadata_by_identifier.get(identifier)
+        linked_raw = linked_meta.raw_metadata if linked_meta else {}
+        dataset_id = str(linked_meta.dataset_id or "") if linked_meta else ""
+
+        writer.writerow({
+            "row_type": "human_event",
+            "event_date": row.event_date or "",
+            "event_time": row.event_time.isoformat() if row.event_time else "",
+            "event_title": row.title or "",
+            "event_location": row.location or "",
+            "event_severity": row.severity or "",
+            "event_status": row.status or "",
+            "event_source": row.source or "",
+            "event_description": row.description or "",
+            "mosdac_identifier": identifier,
+            "mosdac_dataset_id": dataset_id,
+            "mosdac_dataset_name": MOSDAC_DATASET_LABELS.get(dataset_id, dataset_id),
+            "satellite_timestamp": linked_meta.timestamp.isoformat() if linked_meta and linked_meta.timestamp else str(raw_payload.get("updated") or ""),
+            "satellite_product_title": str((linked_raw or {}).get("title") or linked_meta.identifier if linked_meta else ""),
+            "event_ingested_at": row.ingested_at.isoformat() if row.ingested_at else "",
+            "metadata_created_at": linked_meta.created_at.isoformat() if linked_meta and linked_meta.created_at else "",
+            "proof_trace_status": "linked" if linked_meta else "event_without_metadata_link",
+        })
+
+    # Metadata proof rows (human-labeled dataset names).
+    for meta in metadata_rows:
+        raw_meta = meta.raw_metadata if isinstance(meta.raw_metadata, dict) else {}
+        dataset_id = str(meta.dataset_id or "")
+        writer.writerow({
+            "row_type": "metadata_sample",
+            "event_date": "",
+            "event_time": "",
+            "event_title": "",
+            "event_location": "",
+            "event_severity": "",
+            "event_status": "",
+            "event_source": "MOSDAC",
+            "event_description": "",
+            "mosdac_identifier": meta.identifier or "",
+            "mosdac_dataset_id": dataset_id,
+            "mosdac_dataset_name": MOSDAC_DATASET_LABELS.get(dataset_id, dataset_id),
+            "satellite_timestamp": meta.timestamp.isoformat() if meta.timestamp else "",
+            "satellite_product_title": str(raw_meta.get("title") or raw_meta.get("identifier") or ""),
+            "event_ingested_at": "",
+            "metadata_created_at": meta.created_at.isoformat() if meta.created_at else "",
+            "proof_trace_status": "metadata",
+        })
+
+    if not flood_rows and not metadata_rows:
+        writer.writerow({
+            "row_type": "info",
+            "proof_trace_status": "no_mosdac_rows_found",
+        })
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"mosdac_proof_human_readable_{timestamp}.csv"
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/data/ingest/run")

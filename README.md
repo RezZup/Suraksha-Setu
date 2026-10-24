@@ -7,6 +7,9 @@
 
 **Suraksha Setu** is a production-ready, AI-powered disaster management platform providing early warnings, real-time alerts, community collaboration, and intelligent decision support for natural disaster preparedness and response across India.
 
+**Repository:** https://github.com/RezZup/Suraksha-Setu
+**Author:** Gaurav Rajbhar (RezZup)
+
 ---
 
 ## 🌟 Key Features

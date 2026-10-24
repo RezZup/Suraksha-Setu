@@ -19,7 +19,7 @@ const Chatbot = () => {
     {
       id: 1,
       type: 'bot',
-      text: 'Hello! I\'m Suraksha Setu Assistant. I can help you with disaster management, safety tips, weather alerts, and emergency preparedness. How can I assist you today?',
+      text: 'Hello! I\'m DrishtiSetu Assistant. I can help you with disaster management, safety tips, weather alerts, and emergency preparedness. How can I assist you today?',
       timestamp: new Date(),
     },
   ]);
@@ -173,7 +173,7 @@ const Chatbot = () => {
                     <span className="absolute bottom-0 right-0 h-3 w-3 bg-green-500 rounded-full border-2 border-primary"></span>
                   </div>
                   <div>
-                    <h3 className="font-semibold text-sm">Suraksha Setu Assistant</h3>
+                    <h3 className="font-semibold text-sm">DrishtiSetu Assistant</h3>
                     <p className="text-xs opacity-90">Online • Ready to help</p>
                   </div>
                 </div>
@@ -312,7 +312,7 @@ const Chatbot = () => {
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground mt-2 text-center">
-                  Powered by Suraksha Setu AI
+                  Powered by DrishtiSetu AI
                 </p>
               </div>
             </Card>

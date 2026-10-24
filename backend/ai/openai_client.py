@@ -27,9 +27,9 @@ GOOGLE_BASE_URL = os.getenv("GOOGLE_BASE_URL", "https://generativelanguage.googl
 GOOGLE_MODEL_CHAT = os.getenv("GOOGLE_MODEL_CHAT", "gemini-2.0-flash")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_VISION_MODEL = os.getenv("OPENROUTER_MODEL_VISION", "openai/gpt-4o-mini")
-OPENROUTER_CHAT_MODEL = os.getenv("OPENROUTER_MODEL_CHAT", "openai/gpt-4o-mini")
+OPENROUTER_CHAT_MODEL = os.getenv("OPENROUTER_MODEL_CHAT", "nvidia/nemotron-3-ultra-550b-a55b:free")
 OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "")
-OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "Suraksha Setu")
+OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "DrishtiSetu")
 
 
 class OpenAIClient:

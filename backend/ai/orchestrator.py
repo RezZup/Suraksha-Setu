@@ -26,6 +26,8 @@ _MAX_CHAT_HISTORY = 2
 _FREE_CHAT_MIN_CHARS = int(os.getenv("FREE_CHAT_MIN_CHARS", "40"))
 _GOOGLE_CHAT_FIRST = os.getenv("GOOGLE_CHAT_FIRST", "true").strip().lower() in {"1", "true", "yes", "on"}
 _GOOGLE_CHAT_MODEL = os.getenv("GOOGLE_MODEL_CHAT", "gemini-2.0-flash")
+_OPENROUTER_CHAT_FIRST = os.getenv("OPENROUTER_CHAT_FIRST", "false").strip().lower() in {"1", "true", "yes", "on"}
+_OPENROUTER_CHAT_MODEL = os.getenv("OPENROUTER_MODEL_CHAT", "nvidia/nemotron-3-ultra-550b-a55b:free")
 
 
 def _likely_needs_tools(message: str) -> bool:
@@ -444,6 +446,14 @@ class AIOrchestrator:
         primary_client = ai_client.client
 
         if (
+            _OPENROUTER_CHAT_FIRST
+            and ai_client.openrouter_client
+            and not context.get("force_primary_llm")
+        ):
+            primary_provider = "openrouter"
+            primary_model = _OPENROUTER_CHAT_MODEL
+            primary_client = ai_client.openrouter_client
+        elif (
             _GOOGLE_CHAT_FIRST
             and ai_client.google_client
             and not context.get("force_primary_llm")
@@ -480,6 +490,42 @@ class AIOrchestrator:
 
         except Exception as e:
             logger.error("Agent initial error (provider=%s, model=%s): %s", primary_provider, primary_model, e)
+
+            # Some OpenRouter free-model responses can be valid text but fail
+            # OpenAI tool-call deserialization. Retry without tools so chat
+            # widgets still receive the model response.
+            if primary_provider == "openrouter":
+                try:
+                    openrouter_retry = await ai_client.chat_openrouter(
+                        system_prompt=system_prompt,
+                        user_prompt=message,
+                        model=_OPENROUTER_CHAT_MODEL,
+                        max_tokens=min(agent.max_tokens, 700),
+                        temperature=agent.temperature,
+                    )
+                    if openrouter_retry and not openrouter_retry.get("error") and openrouter_retry.get("content"):
+                        retry_text = _sanitize_content(openrouter_retry["content"])
+                        retry_usage = openrouter_retry.get("usage") or {}
+                        return {
+                            "success": True,
+                            "message": retry_text,
+                            "role": role,
+                            "confidence": _compute_confidence({"content": retry_text}, []),
+                            "token_cost": int(retry_usage.get("total", 0) or 0),
+                            "sources": [],
+                            "cached": False,
+                            "providers_used": ["openrouter"],
+                            "provider": "openrouter",
+                            "usage": {
+                                "model": _OPENROUTER_CHAT_MODEL,
+                                "prompt": int(retry_usage.get("prompt", 0) or 0),
+                                "completion": int(retry_usage.get("completion", 0) or 0),
+                                "total": int(retry_usage.get("total", 0) or 0),
+                                "total_tokens": int(retry_usage.get("total", 0) or 0),
+                            },
+                        }
+                except Exception as retry_exc:
+                    logger.error("OpenRouter no-tool retry failed: %s", retry_exc)
 
             # Backup provider path (OpenAI)
             if primary_provider != "openai" and ai_client.client:

@@ -30,12 +30,20 @@ let initError = null;
 
 try {
   app = initializeApp(firebaseConfig);
-  analytics = getAnalytics(app);
   console.log('✅ Firebase initialized successfully');
 } catch (error) {
   initError = error;
   console.error('❌ Firebase initialization failed:', error.message);
   console.error('Full error:', error);
+}
+
+// Analytics is optional and must not prevent Firebase Authentication from loading.
+if (app) {
+  try {
+    analytics = getAnalytics(app);
+  } catch (error) {
+    console.warn('Firebase Analytics unavailable; Authentication remains enabled:', error.message);
+  }
 }
 
 if (!app) {

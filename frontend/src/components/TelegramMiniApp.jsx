@@ -120,7 +120,7 @@ export default function TelegramMiniApp() {
     <div className="telegram-mini-app">
       {/* Header */}
       <div className="telegram-header">
-        <h1>🚨 Suraksha Setu Alerts</h1>
+        <h1>🚨 DrishtiSetu Alerts</h1>
         <p>Disaster Alert System</p>
       </div>
 
@@ -167,7 +167,7 @@ export default function TelegramMiniApp() {
               <h3>📌 What's Next:</h3>
               <ul>
                 <li>✅ Your Chat ID is now linked</li>
-                <li>📍 Set your location in the Suraksha Setu app</li>
+                <li>📍 Set your location in the DrishtiSetu app</li>
                 <li>🔔 Receive real-time disaster alerts on Telegram</li>
               </ul>
             </div>

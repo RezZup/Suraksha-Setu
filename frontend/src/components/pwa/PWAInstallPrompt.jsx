@@ -100,7 +100,7 @@ const PWAInstallPrompt = () => {
                   <Smartphone className="w-6 h-6 text-primary" />
                 </div>
                 <div className="flex-1">
-                  <h3 className="font-bold text-lg mb-1">Install Suraksha Setu</h3>
+                  <h3 className="font-bold text-lg mb-1">Install DrishtiSetu</h3>
                   <p className="text-sm text-muted-foreground mb-3">
                     Get instant disaster alerts on your home screen!
                   </p>
@@ -151,7 +151,7 @@ const PWAInstallPrompt = () => {
                 <Monitor className="w-6 h-6 text-primary" />
               </div>
               <div className="flex-1">
-                <h3 className="font-bold text-lg mb-1">Install Suraksha Setu</h3>
+                <h3 className="font-bold text-lg mb-1">Install DrishtiSetu</h3>
                 <p className="text-sm text-muted-foreground mb-3">
                   Install our app for faster access and offline support!
                 </p>
